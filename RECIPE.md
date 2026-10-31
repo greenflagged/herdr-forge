@@ -82,6 +82,13 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
   red) ask first. Then they start Claude Code in a worktree of the branch. The task treats MR text as
   untrusted. Get merged waits for a go-ahead before merging; Fix conflicts force-pushes and never
   merges. Neither shows on fork MRs.
+- Agents already on an MR are listed under it: agents and live sub-agents whose folder is a
+  checkout of the project (origin's path matches) on the MR's source branch. The pane's branch comes
+  from Herdr; sub-agents' folders are asked with git (a minute apart; ten minutes where Herdr knows
+  the branch). Merged with any `forge.requestAgents` another mod publishes.
+- With an owner, ✦ Get merged / ✦ Fix conflicts become ✦ Ask to merge / ✦ Ask to fix conflicts:
+  shows the message, then `hc send <agent> <text>` (a sub-agent's parent gets it). Hidden while the
+  agent shows a prompt.
 - Issue edits are written to GitLab first, shown at once, and rolled back if GitLab refuses. One write
   runs at a time.
 - Keys: ↑/↓ or j/k move the selection, `/` searches, Esc clears, Enter opens in the browser.

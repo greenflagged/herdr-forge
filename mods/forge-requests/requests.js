@@ -1,7 +1,7 @@
 // forge-requests' pure parts: no Herdr imports, so test/forge-requests.test.js runs them
 // under plain Node.
 
-import { requestItem } from "./lib.js";
+import { requestItem, parseRemote } from "./lib.js";
 
 // A CI status as a one-glyph badge: glyph (null: spinner), theme color, still going.
 // Statuses are GitLab's words on every forge (docs/contract.md).
@@ -95,4 +95,87 @@ export function liveAgents(list, byAgent, byTerminal) {
     const status = k.status === "error" ? "blocked" : k.status === "done" ? "idle" : k.status;
     return [{ address, name, pane: null, program: k.program, status }];
   });
+}
+
+// ---- the agents that own a request ----
+// An agent owns a request when its folder is a checkout of the project on the request's
+// source branch. Herdr says where every agent and live sub-agent is (and, for panes, the
+// branch); main.js looks up the rest with git and passes it in as `git`.
+
+export const machineOf = (address) => {
+  const i = (address ?? "").indexOf("/");
+  return i > 0 ? address.slice(0, i) : null;
+};
+export const placeKey = (machine, cwd) => JSON.stringify([machine, cwd]);
+
+// address -> { address, key, machine, cwd, branch, parent, pane, status, program, name }
+// from agents(), panes() and terminals(). Sub-agents have no pane: branch null, parent set.
+export function agentPlaces(agentList, paneList, terminalList) {
+  const byPane = new Map((paneList ?? []).map((p) => [p.pane, p]));
+  const out = new Map();
+  for (const a of agentList ?? []) {
+    const p = byPane.get(a.pane);
+    if (!p?.cwd) continue;
+    const machine = machineOf(a.address);
+    out.set(a.address, {
+      address: a.address, key: placeKey(machine, p.cwd), machine, cwd: p.cwd, branch: p.branch ?? null,
+      parent: null, pane: a.pane, status: a.status, program: a.program,
+      name: a.tab_name || a.space_name || a.program?.name || a.address,
+    });
+  }
+  for (const k of terminalList ?? []) {
+    if (out.has(k.address) || !k.parent || k.state !== "live" || !k.cwd) continue;
+    const machine = machineOf(k.address);
+    out.set(k.address, {
+      address: k.address, key: placeKey(machine, k.cwd), machine, cwd: k.cwd, branch: null,
+      parent: k.parent, pane: null, status: k.status === "error" ? "blocked" : k.status === "done" ? "idle" : k.status ?? null,
+      program: k.program, name: k.name || k.template || k.program?.name || k.address,
+    });
+  }
+  return out;
+}
+
+// What git said about a folder: "branch\nremote url" -> { branch, remote }.
+export function parseGitLook(stdout) {
+  const [branch = "", remote = ""] = String(stdout ?? "").split("\n");
+  return { branch: branch.trim() || null, remote: remote.trim() || null };
+}
+
+// The places working on request r. git: Map key -> { branch, remote }. A pane's live
+// branch beats what git said earlier; the remote must be this project (a branch with the
+// same name in another repo isn't ours). Never a fork's request: its branch name says
+// nothing about our checkouts.
+export function ownersOf(r, places, git, project) {
+  if (!r?.source || r.fork || !project?.repo) return [];
+  const repo = project.repo.toLowerCase();
+  const out = [];
+  for (const pl of places.values()) {
+    const g = git.get(pl.key);
+    if (!g) continue;
+    if ((pl.branch ?? g.branch) !== r.source) continue;
+    const remote = parseRemote(g.remote);
+    if (!remote || remote.path.toLowerCase() !== repo) continue;
+    out.push(pl);
+  }
+  return out;
+}
+
+// Who to talk to about a request: a top-level owner, else the agent that started an
+// owning sub-agent (it's the one running that work). null: no one we can type to.
+export function askTarget(owners, places) {
+  const top = owners.find((o) => o.pane);
+  if (top) return top;
+  for (const o of owners) {
+    const parent = o.parent ? places.get(o.parent) : null;
+    if (parent?.pane) return parent;
+  }
+  return null;
+}
+
+// What the Ask buttons type into the owning agent: merge when ready, or fix conflicts.
+export function askText(kind, r, terms) {
+  const ref = `${terms.reqPrefix}${r.iid}`;
+  return kind === "conflicts"
+    ? `${ref} has conflicts with ${r.target ?? "its target branch"}. Rebase it, resolve them, push, and tell me when it's clean. Don't merge.`
+    : `Get ${ref} ready and merge it once CI passes. If something needs a decision, ask me first.`;
 }

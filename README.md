@@ -42,9 +42,33 @@ which it names ("Oct 31, 1:40 PM UTC−7"). Due dates are calendar days, the sam
 
 ## Which buttons start an agent
 
-**✦ marks every button that starts an AI agent.** A button without ✦ acts at once, by itself.
-That holds for your own buttons too: any button with a `task` gets the ✦. Hover a button for
-what it does. Every button that writes to the forge or starts an agent asks before it runs.
+**✦ marks every button that hands work to an AI agent.** A button without ✦ acts at once, by
+itself. That holds for your own buttons too: any button with a `task` gets the ✦. Hover a button
+for what it does. Every button that writes to the forge or involves an agent asks before it runs.
+
+### Agents already on an MR
+
+Each MR lists the agents working on it underneath, with their state: working, idle, waiting on
+CI, or **Needs you** when the agent is showing a prompt. Click one to go to it.
+
+The panel finds them itself, in any Herdr layout: an agent (or a sub-agent) whose folder is a
+checkout of the project on the MR's source branch. That includes worktrees, and agents on other
+machines. Nothing needs to be set up, and the agents pane Herdr ships with is left alone. Other
+mods can add agents too (the `forge.requestAgents` key in [docs/contract.md](docs/contract.md)).
+
+When an agent already owns an MR, there's no reason to start another one, so the ✦ Get merged
+and ✦ Fix conflicts buttons below give way to **✦ Ask to merge** and **✦ Ask to fix
+conflicts**. They show you the message, then type it into that agent as if you had:
+
+- ✦ Ask to merge: "Get !12 ready and merge it once CI passes. If something needs a decision, ask
+  me first."
+- ✦ Ask to fix conflicts: "!12 has conflicts with main. Rebase it, resolve them, push, and tell
+  me when it's clean. Don't merge."
+
+A sub-agent's work goes to the agent that started it. Nothing is sent while the agent shows a
+prompt, because the text would answer it.
+
+### Buttons on an MR
 
 Hover an MR (or PR) to get these buttons:
 
@@ -53,6 +77,7 @@ Hover an MR (or PR) to get these buttons:
 | **Merge** | MRs that aren't drafts and have no conflicts | Merges now, only the commit you saw. If CI is still running, it turns on auto-merge instead. | No |
 | **✦ Get merged** | MRs open a day or more, without conflicts | Starts Claude Code in a worktree of the branch. It fixes failing CI, conflicts and review comments, then **waits for your go-ahead before merging**. | Yes |
 | **✦ Fix conflicts** (red) | MRs with conflicts | Starts Claude Code in a worktree of the branch. It rebases onto the target branch, resolves the conflicts, runs the tests and **force-pushes** the branch. It never merges. | Yes |
+| **✦ Ask to merge** / **✦ Ask to fix conflicts** | MRs an agent already works on (instead of the two above) | Types the request into that agent, after showing you the message. | That agent |
 
 Some things to know about the agent buttons:
 
