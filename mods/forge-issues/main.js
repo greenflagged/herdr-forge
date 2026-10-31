@@ -1,5 +1,5 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Scrollbar, v_virtual_list, h_resizable, resizable_panel } from "gpui-base";
+import { v_flex, h_flex, Popover, InputState, Input, TextareaState, Textarea, TextView, Scrollbar, v_virtual_list, h_resizable, resizable_panel } from "gpui-base";
 import {
   exec, props, theme, run, spaces, panes, layout, knownAgents, shared, setShared, appHome, window, readTextFile, openOverlay,
 } from "herdr";
@@ -16,6 +16,7 @@ import {
 //   scopes: ["priority", "type", ...]  which scoped-label facets to show, in order
 //   scopeSep: "::"                     the scoped-label separator (default: the forge's)
 //   triage: true | { agent, task, tab } the optional triage agent (off by default)
+//   issue: 123                         open this issue at once (a link into the tab from another mod)
 // forge.py keeps the issues in SQLite on `on` and does the filtering, counting and
 // sorting: Herdr's JS engine is far too slow for that. This view keeps only the rows it
 // has fetched and the open issue. Every edit goes to the forge first; the cache keeps
@@ -81,6 +82,8 @@ export default class Issues extends View {
     cx.spawn(async (cx) => {
       if (!this.ready()) return;
       await Promise.all([this.readMeta(), this.loadList(++this.seq)]);
+      const first = Number(props()?.issue);
+      if (Number.isInteger(first) && first > 0) this.open(first, cx);
       cx.notify();
       if (this.triage()) this.checkSkill(cx, false);
       this.sync(cx, false);
@@ -657,15 +660,38 @@ export default class Issues extends View {
     const launches = d.launches ?? [];
     const requestAgents = shared("forge.requestAgents") ?? {};
 
-    const pickRow = (title, options, current, onPick) => h_flex().gap(6).items_start()
-      .child(div().w(64).flex_none().pt(2).text_size(11).text_color(t.dim).truncate().child(title))
-      .child(h_flex().flex_1().min_w(0).gap(4).flex_wrap().children(options.map(([value, label, color]) =>
-        div().id(`set-${title}-${label}`).px(6).py(1).rounded(4).text_size(11).cursor_pointer()
-          .border_1().border_color(value === current ? (color ?? t.accent) : t.border)
-          .when(value === current, (e) => e.bg((color ?? t.accent) + "26").text_color(t.foreground))
-          .when(value !== current, (e) => e.text_color(t.muted).hover((s) => s.bg(t.hover)))
-          .on_click((_e, cx) => { if (value !== current) onPick(value, cx); })
-          .child(label))));
+    // One value per field (a scoped label holds one), so each is a dropdown: the current
+    // value with its color, and a list of the others when clicked.
+    const dot = (color) => div().size(7).rounded(4).flex_none().bg(color);
+    const pickRow = (title, options, current, onPick) => {
+      const id = `pick-${title}`;
+      const open = this.picking === id;
+      const cur = options.find(([v]) => v === current) ?? [null, "none"];
+      const trigger = h_flex().id(`${id}-trigger`).gap(6).items_center().px(6).py(1).rounded(4).text_size(11.5)
+        .cursor_pointer().border_1().border_color(open ? t.accent : t.border).hover((s) => s.bg(t.hover))
+        .when(Boolean(cur[2]), (e) => e.child(dot(cur[2])))
+        .child(div().max_w(220).truncate().text_color(current == null ? t.muted : t.foreground).child(cur[1]))
+        .child(div().text_size(9).text_color(t.dim).child("▾"));
+      const list = v_flex().id(`${id}-list`).min_w(160).max_h(320).overflow_y_scrollbar().p(4).gap(1).rounded(6)
+        .bg(t.popover).border_1().border_color(t.border).shadow_md()
+        .children(options.map(([value, label, color]) => h_flex().id(`${id}-${label}`).gap(6).items_center()
+          .px(8).py(3).rounded(4).text_size(11.5).cursor_pointer()
+          .when(value === current, (e) => e.bg(t.selected))
+          .hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => {
+            this.picking = null;
+            if (value !== current) onPick(value, cx);
+            cx.notify();
+          })
+          .child(color ? dot(color) : div().size(7).flex_none())
+          .child(div().flex_1().min_w(0).truncate().text_color(value == null ? t.muted : t.foreground).child(label))
+          .when(value === current, (e) => e.child(div().text_size(10).text_color(t.dim).child("✓")))));
+      return h_flex().gap(6).items_center()
+        .child(div().w(64).flex_none().text_size(11).text_color(t.dim).truncate().child(title))
+        .child(Popover.new(id).open(open)
+          .on_open_change((o, cx) => { this.picking = o ? id : this.picking === id ? null : this.picking; cx.notify(); })
+          .trigger(trigger).content(list));
+    };
 
     const scopes = orderScopes(this.scopes, props()?.scopes, [...metaScopes(this.labels, sep), ...Object.keys(scoped)]);
     const scopeRow = (scope) => {
