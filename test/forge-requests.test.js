@@ -4,6 +4,7 @@ import { actionLabel, actionList, describe, fill, matches, projectOf, requestIte
 import {
   CI, checkoutOf, defaultActions, itemOf, liveAgents, mergeTip, agentPlaces, parseGitLook, ownersOf, askTarget, askText, machineOf,
   shownMerged, deployState, checkDue, cleanupPlan, cleanupLines, notDoneWhy, CLEAN_WORKTREE, GIT_LOOK, RECENT,
+  MIGRATIONS, migrationPattern, migrationsOf, orderFacts, clashText,
 } from "../mods/forge-requests/requests.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, existsSync, rmSync, realpathSync } from "node:fs";
@@ -61,7 +62,7 @@ test("agent buttons carry the mark; Merge says it acts at once, with no agent", 
 test("default tasks fill every placeholder and use the forge's words", () => {
   for (const provider of ["gitlab", "github"]) {
     const project = projectOf({ repo: "acme/shop", provider });
-    const item = requestItem(request(), project);
+    const item = itemOf(request(), project); // what the panel fills actions with
     for (const a of defaultActions(project.terms)) {
       assert.equal(a.worktree, true);
       const task = fill(a.task, item);
@@ -334,4 +335,64 @@ test("GIT_LOOK and CLEAN_WORKTREE against a real worktree", { skip: !hasGit }, (
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- merge order ----
+
+const D = "app/db/migration";
+const orderOf = (requests, targets = []) => ({ requests, targets });
+
+test("migrationsOf reads Flyway versions; the pattern can change or be off", () => {
+  assert.deepEqual(migrationsOf([`${D}/V12__add.sql`, "src/V3__x.kt", "V7__top.sql"], MIGRATIONS), [
+    { path: `${D}/V12__add.sql`, folder: D, name: "V12__add.sql", version: 12 },
+    { path: "V7__top.sql", folder: "", name: "V7__top.sql", version: 7 }]);
+  assert.equal(migrationPattern(undefined), MIGRATIONS);
+  assert.equal(migrationPattern(false), null);
+  assert.deepEqual(migrationsOf(["migrations/0042_add.py"], migrationPattern("(\\d{4})_\\w+\\.py$")).map((m) => m.version), [42]);
+  assert.deepEqual(migrationsOf(["a"], "(("), [], "a bad pattern is no migrations");
+});
+
+test("orderFacts finds overlaps and clashing migration numbers, and picks who goes first", () => {
+  const reqs = [
+    request({ iid: 1, ci: { status: "running" }, created_ms: 1 }),
+    request({ iid: 2, ci: { status: "success" }, created_ms: 2 }),
+    request({ iid: 3, ci: { status: "success" }, created_ms: 3 }),
+    request({ iid: 4, ci: { status: "success" }, created_ms: 4 }),
+  ];
+  const order = orderOf({
+    1: { behind: 0, rebase: false, files: ["src/a.kt", `${D}/V9__one.sql`] },
+    2: { behind: 2, rebase: true, files: ["src/a.kt"] },
+    3: { behind: 0, rebase: false, files: [`${D}/V9__three.sql`] },
+    4: { behind: 0, rebase: false, files: [`${D}/V8__four.sql`, "README"] },
+  }, [{ ref: "main", folder: D, files: ["V7__x.sql", "V8__taken.sql"] }]);
+  const f = orderFacts(reqs, order, MIGRATIONS);
+  assert.deepEqual(f.get(1).overlaps, [{ iid: 2, files: ["src/a.kt"] }]);
+  assert.deepEqual(f.get(1).clashes, [{ version: 9, name: "V9__one.sql", by: 3 }]);
+  assert.deepEqual(f.get(3).clashes, [{ version: 9, name: "V9__three.sql", by: 1 }]);
+  assert.deepEqual(f.get(4).clashes, [{ version: 8, name: "V8__four.sql", by: "target" }]);
+  // 1, 2 and 3 are one group: 3 is green and current, 2 must rebase, 1's CI still runs.
+  assert.deepEqual([1, 2, 3].map((i) => [f.get(i).next, f.get(i).after]), [[false, 3], [false, 3], [true, null]]);
+  assert.deepEqual([f.get(4).next, f.get(4).after], [false, null], "alone: no order to suggest");
+  assert.equal(f.get(2).behind, 2);
+  assert.equal(orderFacts(reqs, orderOf({}), MIGRATIONS).size, 0, "nothing known yet");
+});
+
+test("itemOf, clashText and askText say what a rebase must also do", () => {
+  const project = projectOf({ repo: "acme/shop" });
+  const facts = { behind: 0, rebase: false, clashes: [{ version: 8, name: "V8__four.sql", by: "target" }, { version: 8, name: "V8__four.sql", by: 2 }] };
+  const text = clashText(facts.clashes, project.terms);
+  assert.equal(text, "Renumber the migration to the next free version after rebasing: V8__four.sql uses version 8, which the target branch already has; V8__four.sql uses version 8, which !2 also adds.");
+  const item = itemOf(request(), project, facts);
+  assert.equal(item.needs_rebase, true, "a clash needs a rebase even when current");
+  assert.equal(itemOf(request(), project, { behind: 0, rebase: false, clashes: [] }).needs_rebase, false);
+  assert.equal(itemOf(request(), project).needs_rebase, false, "no facts yet");
+  assert.match(askText("rebase", request(), project.terms, text), /^Rebase !7 onto main and push\. Renumber .* Don't merge\.$/);
+
+  const rebase = defaultActions(project.terms).find((a) => a.id === "rebase");
+  assert.ok(matches(rebase.when, item));
+  assert.ok(!matches(rebase.when, { ...item, conflicts: true }), "conflicts: Fix conflicts instead");
+  const task = fill(rebase.task, item);
+  assert.match(task, /2\. Renumber the migration/);
+  assert.doesNotMatch(task, /\{\w+\}/, "every placeholder filled");
+  assert.match(fill(rebase.task, itemOf(request(), project, { rebase: true, clashes: [] })), /2\. If you add a database migration/);
 });

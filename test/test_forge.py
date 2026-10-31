@@ -101,6 +101,32 @@ class Forge(unittest.TestCase):
         self.run_forge("merged", *P, 60, 0)
         self.assertEqual(len(self.calls()), n, "a fresh answer comes from the cache")
 
+    def test_order_gives_behind_files_and_the_targets_migrations(self):
+        mig = "db/migration"
+        self.routes([
+            [r"merge_requests\?state=opened", {"out": [mr(7), mr(8)]}],
+            [r"pipelines\?per_page=50", {"out": []}],
+            [r"projects/acme%2Fshop$", {"out": {"merge_method": "ff"}}],
+            [r"merge_requests/7\?include_diverged", {"out": {"sha": "sha7", "diverged_commits_count": 0, "detailed_merge_status": "mergeable"}}],
+            [r"merge_requests/8\?include_diverged", {"out": {"sha": "sha8", "diverged_commits_count": 3, "detailed_merge_status": "unchecked"}}],
+            [r"merge_requests/7/diffs", {"out": [{"new_path": f"{mig}/V5__a.sql", "old_path": f"{mig}/V5__a.sql"}]}],
+            [r"merge_requests/8/diffs", {"out": [{"new_path": "src/b.kt", "old_path": "src/old_b.kt"}]}],
+            [r"repository/tree\?path=db%2Fmigration&ref=main", {"out": [
+                {"name": "V4__x.sql", "type": "blob"}, {"name": "sub", "type": "tree"}]}],
+        ])
+        out = self.run_forge("order", *P, 60, 0, r"(^|/)V(\d+)__[^/]*\.sql$")
+        self.assertIsNone(out["error"])
+        a, b = out["requests"]["7"], out["requests"]["8"]
+        self.assertEqual((a["behind"], a["rebase"], a["files"]), (0, False, [f"{mig}/V5__a.sql"]))
+        self.assertEqual((b["behind"], b["rebase"]), (3, True), "fast-forward project: behind blocks the merge")
+        self.assertEqual(b["files"], ["src/b.kt", "src/old_b.kt"], "a rename counts both paths")
+        self.assertEqual(out["targets"], [{"ref": "main", "folder": mig, "files": ["V4__x.sql"]}])
+        # Same heads: files aren't asked for again.
+        n = sum("diffs" in c for c in self.calls())
+        self.run_forge("order", *P, 60, 1, r"(^|/)V(\d+)__[^/]*\.sql$")
+        self.assertEqual(sum("diffs" in c for c in self.calls()), n)
+        self.assertEqual(sum(c.endswith("projects/acme%2Fshop") for c in self.calls()), 1, "merge method asked once a day")
+
     def test_merge_drops_the_merged_list(self):
         self.routes([[r"merge_requests\?state=merged", {"out": []}], [r"mr merge", {"out": "Merged"}]])
         self.run_forge("merged", *P, 600, 0)

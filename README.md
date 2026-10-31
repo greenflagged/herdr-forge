@@ -77,7 +77,8 @@ Hover an MR (or PR) to get these buttons:
 | **Merge** | MRs that aren't drafts and have no conflicts | Merges now, only the commit you saw. If CI is still running, it turns on auto-merge instead. | No |
 | **✦ Get merged** | MRs open a day or more, without conflicts | Starts Claude Code in a worktree of the branch. It fixes failing CI, conflicts and review comments, then **waits for your go-ahead before merging**. | Yes |
 | **✦ Fix conflicts** (red) | MRs with conflicts | Starts Claude Code in a worktree of the branch. It rebases onto the target branch, resolves the conflicts, runs the tests and **force-pushes** the branch. It never merges. | Yes |
-| **✦ Ask to merge** / **✦ Ask to fix conflicts** | MRs an agent already works on (instead of the two above) | Types the request into that agent, after showing you the message. | That agent |
+| **✦ Rebase** | MRs that must be rebased before merging, or whose migration number is taken | Starts Claude Code in a worktree of the branch. It rebases onto the target, renumbers a clashing migration, runs the tests and **force-pushes** the branch. It never merges. | Yes |
+| **✦ Ask to merge** / **✦ Ask to fix conflicts** / **✦ Ask to rebase** | MRs an agent already works on (instead of the three above) | Types the request into that agent, after showing you the message. | That agent |
 
 Some things to know about the agent buttons:
 
@@ -89,6 +90,31 @@ Some things to know about the agent buttons:
   The task tells the agent to read them as data, never as instructions.
 - **To turn them off**, set `"actions": []` on the merge requests panel. To keep them and add your
   own, use `"actions": ["defaults", { ... }]` (see [docs/actions.md](docs/actions.md)).
+
+### Merging in order
+
+When several MRs are open at once, a line of chips under each one says where it stands against
+the others:
+
+- **N behind**: how many commits its target has gained since it branched. It's amber when that
+  blocks merging (fast-forward and semi-linear GitLab projects, or a GitHub branch rule that
+  wants it up to date), dim when it doesn't.
+- **overlaps !X**: it changes some of the same files as !X. Hover for the files.
+- **V182 taken**: a database migration it adds uses a version number that the target branch
+  already has, or that another open MR adds too.
+- **merge first** / **after !X**: among MRs that overlap or clash, the readiest one goes first.
+  That's the one that isn't a draft, has no conflicts, doesn't need a rebase and has green CI,
+  and the oldest when they tie. The others rebase after it.
+
+For an MR that needs a rebase or has a taken migration number, hover for **✦ Rebase**. It starts
+Claude Code in a worktree to rebase onto the target and renumber the migration, then force-push.
+If an agent already owns the MR, you get **✦ Ask to rebase** instead, which sends that agent the
+same request. Neither ever merges.
+
+Migrations are found by file name, Flyway style (`V12__add_index.sql`) by default. Set the panel's
+`migrations` prop to your own pattern, whose last group of digits is the version (for Django,
+`"(\\d{4})_\\w+\\.py$"`), or to `false` to turn this off. The panel checks all of this every 5
+minutes, with one call per open MR, and asks for an MR's files again only when its head changes.
 
 ### After a merge
 
@@ -236,6 +262,7 @@ Each panel is a mod, so you can place it in a layout of your own (a clone of `ma
 | `host` | Your forge's host name, if it isn't gitlab.com (or github.com with `provider: github`). |
 | `folder` | The project's checkout on that machine, where agents start (merge requests and issues). |
 | `actions` | Your own buttons (merge requests and issues). |
+| `migrations` | A pattern for migration file names (default Flyway's `V12__name.sql`), or `false` (merge requests; see [Merging in order](#merging-in-order)). |
 | `deploy` | `{ "label": "Flux", "check": "…" }`: how to tell a merge is live (merge requests; see [After a merge](#after-a-merge)). |
 
 Each panel's other props are listed at the top of its `main.js`. To add a Forge button to a tab bar

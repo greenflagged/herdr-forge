@@ -115,6 +115,20 @@ class GitHub(unittest.TestCase):
         self.assertIsNone(b["ci"], "no checks on the merge commit")
         self.assertEqual(len(out["merged"]), 2, "a month-old merge is left out")
 
+    def test_order_asks_compare_for_how_far_behind(self):
+        nodes = [{"number": 7, "headRefOid": "sha7", "baseRefName": "main", "mergeStateStatus": "BEHIND",
+                  "files": {"totalCount": 1, "nodes": [{"path": "a.py"}]}},
+                 {"number": 9, "headRefOid": "sha9", "baseRefName": "main", "mergeStateStatus": "CLEAN",
+                  "files": {"totalCount": 0, "nodes": []}}]
+        self.routes([[r"pullRequests\(states:OPEN,first:50,\s*orderBy:\{field:UPDATED_AT,direction:DESC\}\)\{nodes\{number headRefOid", repo(pullRequests=conn(nodes))],
+                     [r"pullRequests\(states:OPEN", repo(pullRequests=conn([pr(7)]))],
+                     [r"compare/main\.\.\.sha7", {"out": {"behind_by": 4}}]])
+        out = self.run_forge("order", *P, 60, 0)
+        self.assertIsNone(out["error"])
+        self.assertEqual(out["requests"], {"7": {"sha": "sha7", "behind": 4, "rebase": True, "files": ["a.py"]}},
+                         "only open PRs the list shows")
+        self.assertEqual(out["targets"], [], "no migration pattern: no folders listed")
+
     def test_merge_uses_a_method_the_repo_allows(self):
         self.routes([[r"-X PUT .*repos/acme/shop/pulls/7/merge", {"out": {"merged": True, "message": "Pull Request successfully merged"}}],
                      [r"mergeCommitAllowed", repo(mergeCommitAllowed=False, squashMergeAllowed=True, rebaseMergeAllowed=True)]])

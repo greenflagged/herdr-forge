@@ -357,6 +357,38 @@ class GitLab(Cli):
         lines = [l for l in self.run(argv).splitlines() if l.strip()]
         return lines[-1] if lines else "Merged"
 
+    def order_info(self, reqs, known):
+        """{iid: {sha, behind, rebase, files}} for open requests: how far each is behind its
+        target, whether that blocks merging (a fast-forward project), and its changed files.
+        known: the last answer's {iid: {sha, files}}; files are asked again only for a new head."""
+        # Fast-forward and semi-linear projects only merge a branch that's up to date. GitLab
+        # says need_rebase only once it has checked, so being behind counts too.
+        method = self.p.meta("merge_method")
+        if not method or time.time() - method[1] > 86400:
+            method = [self.api(self.project).get("merge_method") or "merge", time.time()]
+            self.p.set_meta("merge_method", method)
+        linear = method[0] in ("ff", "rebase_merge")
+        out = {}
+        for r in reqs:
+            if over_budget():
+                break
+            m = self.api(f"{self.project}/merge_requests/{r['iid']}?include_diverged_commits_count=true")
+            sha = m.get("sha")
+            files = (known.get(str(r["iid"])) or {}).get("files") if (known.get(str(r["iid"])) or {}).get("sha") == sha else None
+            if files is None:
+                files = []
+                for batch in self.pages(f"{self.project}/merge_requests/{r['iid']}/diffs", 100):
+                    files += sorted({f.get(k) for f in batch for k in ("new_path", "old_path") if f.get(k)})
+            out[str(r["iid"])] = {"sha": sha, "behind": m.get("diverged_commits_count"),
+                                  "rebase": m.get("detailed_merge_status") == "need_rebase"
+                                  or (linear and (m.get("diverged_commits_count") or 0) > 0), "files": files}
+        return out
+
+    def tree(self, ref, path):
+        """The file names in one folder on `ref`."""
+        q = f"path={urllib.parse.quote(path, safe='')}&ref={urllib.parse.quote(ref, safe='')}"
+        return [e["name"] for e in self.all_pages(f"{self.project}/repository/tree?{q}") if e.get("type") == "blob"]
+
     def merged(self, since):
         """Merged since `since` (epoch s), newest first, each with its merge commit's newest
         pipeline on the target branch. A fast-forward merge has no merge commit: the head is it."""
@@ -692,6 +724,32 @@ class GitHub(Cli):
                 raise e
             return "Set to merge when checks pass"
         return (out or {}).get("message") or "Merged"
+
+    ORDER_Q = """query($o:String!,$n:String!){repository(owner:$o,name:$n){pullRequests(states:OPEN,first:50,
+      orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number headRefOid baseRefName mergeStateStatus
+      files(first:100){totalCount nodes{path}}}}}}"""
+
+    def order_info(self, reqs, known):
+        """As GitLab's. Files come with the PRs (the first 100); how far behind is one
+        compare per PR. BEHIND: the branch rules want it up to date before merging."""
+        want = {str(r["iid"]) for r in reqs}
+        out = {}
+        for m in self.repository(self.ORDER_Q)["pullRequests"]["nodes"]:
+            iid = str(m["number"])
+            if iid not in want:
+                continue
+            if over_budget():
+                break
+            cmp = self.api(f"{self.repo}/compare/{urllib.parse.quote(m['baseRefName'], safe='')}...{m['headRefOid']}")
+            out[iid] = {"sha": m["headRefOid"], "behind": (cmp or {}).get("behind_by"),
+                        "rebase": m.get("mergeStateStatus") == "BEHIND",
+                        "files": [f["path"] for f in ((m.get("files") or {}).get("nodes") or [])]}
+        return out
+
+    def tree(self, ref, path):
+        q = urllib.parse.quote(ref, safe="")
+        entries = self.api(f"{self.repo}/contents/{urllib.parse.quote(path)}?ref={q}")
+        return [e["name"] for e in entries if isinstance(entries, list) and e.get("type") == "file"]
 
     MERGED_Q = """query($o:String!,$n:String!){repository(owner:$o,name:$n){pullRequests(states:MERGED,first:50,
       orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number title url headRefName baseRefName headRefOid
@@ -1124,6 +1182,40 @@ class Project:
             r["ci"] = ci.get(r["sha"]) or r.get("ci")  # GitHub's comes with the request
         return {"requests": reqs, "at": at, "error": err}
 
+    def order(self, max_age, force, pattern=""):
+        """What a merge order needs (docs/contract.md): per open request how far behind and
+        its files; with a migration pattern, the target branch's files in every folder an
+        open request adds a migration to."""
+        rx = None
+        if pattern:
+            try:
+                rx = re.compile(pattern)
+            except re.error as e:
+                raise RuntimeError(f"bad migration pattern: {e}")
+
+        def fetch():
+            reqs = self.cached("requests", max_age, self.forge.requests, [])[0]
+            known = self.meta("order_known", {})
+            info = self.forge.order_info(reqs, known)
+            self.set_meta("order_known", {k: {"sha": v["sha"], "files": v["files"]} for k, v in info.items()})
+            self.db.commit()
+            folders = {}
+            if rx:
+                for r in reqs:
+                    for f in (info.get(str(r["iid"])) or {}).get("files") or []:
+                        if rx.search(f) and "/" in f:
+                            folders.setdefault((r.get("target") or "main", f.rsplit("/", 1)[0]), None)
+                for (ref, folder) in list(folders):
+                    if over_budget():
+                        break
+                    folders[(ref, folder)] = self.forge.tree(ref, folder)
+            return {"requests": info,
+                    "targets": [{"ref": ref, "folder": folder, "files": names}
+                                for (ref, folder), names in folders.items() if names is not None]}
+
+        data, at, err = self.cached(f"order:{pattern}", max_age, fetch, {"requests": {}, "targets": []}, force)
+        return {**data, "at": at, "error": err}
+
     def merged(self, max_age, force):
         rows, at, err = self.cached("merged", max_age, lambda: self.forge.merged(time.time() - MERGED_DAYS * 86400),
                                     [], force)
@@ -1131,7 +1223,7 @@ class Project:
 
     def merge(self, iid, sha):
         text = self.forge.merge(iid, sha)
-        self.drop("requests", "request-ci", "pipelines", "merged")
+        self.drop("requests", "request-ci", "pipelines", "merged", "order")
         self.stale_velocity()
         return {"ok": True, "text": text}
 
@@ -1739,6 +1831,7 @@ def main(argv):
         "requests": lambda: p.requests(age(0), force(1)),
         "merge": lambda: p.merge(int(a[0]), a[1] if len(a) > 1 else ""),
         "merged": lambda: p.merged(age(0), force(1)),
+        "order": lambda: p.order(age(0), force(1), a[2] if len(a) > 2 else ""),
         "pipelines": lambda: p.pipelines(age(0), force(1)),
         "jobs": lambda: p.jobs(int(a[0]), age(1), force(2)),
         "pipeline-act": lambda: p.pipeline_act(int(a[0]), a[1]),
