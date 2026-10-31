@@ -4,3 +4,6 @@ mods/*/jsconfig.json
 mods/*/*.error
 __pycache__/
 node_modules/
+
+# agent worktrees
+.claude/
