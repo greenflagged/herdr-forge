@@ -25,9 +25,9 @@ The same panels also work as blocks in any layout.
   - A pill with the machine ("this computer" when local).
   - "Other project ▾": a list of the open spaces, each with its machine; picking one opens its repo.
   - On the right, "ctrl-shift-f" in 11 px `dim` and a "Back to ‹layout›" button.
-- Below the bar, a row of columns. The first is 360 px and holds MRs, Milestones and Velocity
-  (330 px tall). Then come CI (330 px) and Runners (290 px). Issues fills the rest. 1 px `border` dividers
-  sit between them.
+- Below the bar, a row: a 360 px column with MRs, Milestones and Velocity (330 px tall); a 340 px
+  column with CI over Runners (2:1); and Issues filling the rest. 1 px `border` dividers sit between
+  them.
 
 **Every panel** draws on `background` under the same 34 px header with a 1 px `border` line. The
 header holds, in order: a ▾/▸ caret when the panel can collapse, the title (13 px semibold), a count

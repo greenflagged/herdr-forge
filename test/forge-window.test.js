@@ -9,7 +9,7 @@ const mods = (node) => node.content ? [node.content.mod] : (node.children ?? [])
 test("the Forge layout holds every panel under its bar, with the project's props", () => {
   const l = forgeLayout(project);
   assert.equal(l.id, "root");
-  assert.deepEqual(l.children[1].children.map((n) => n.id), ["forge-left", "forge-ci", "forge-runners", "forge-issues"]);
+  assert.deepEqual(l.children[1].children.map((n) => n.id), ["forge-left", "forge-middle", "forge-issues"]);
   assert.deepEqual(mods(l), ["forge-window", ...PANELS.map((p) => p.mod)]);
   const blocks = l.children[1].children.flatMap((n) => n.children ?? [n]);
   const issues = blocks.find((b) => b.content.mod === "forge-issues").content.props;

@@ -688,12 +688,13 @@ export default class Issues extends View {
     const triaged = this.triaged(tc);
     const sortList = sorts(triaged);
     const sort = sortList.find((s) => s.id === this.sort) ?? sortList[0];
-    const header = h_flex().h(40).flex_none().px(10).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(div().id("issues-search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
+    // Search on its own row, so it keeps its width in a narrow list; state and sort below it.
+    const header = v_flex().flex_none().px(10).pt(8).pb(6).gap(6).border_b(1).border_color(t.border)
+      .child(div().id("issues-search").w_full().h(28).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .when(this.inputFocused, (e) => e.border_color(t.accent))
         .child(Input.new(this.input).h_full().text_size(12.5).text_color(t.foreground)))
-      .child(h_flex().flex_none().rounded(6).border_1().border_color(t.border).children(STATES.map((s) =>
+      .child(h_flex().gap(8).items_center().child(h_flex().flex_none().rounded(6).border_1().border_color(t.border).children(STATES.map((s) =>
         div().id(`st-${s.id}`).px(8).py(3).text_size(11.5).cursor_pointer()
           .when(this.state === s.id, (e) => e.bg(t.selected).text_color(t.foreground))
           .when(this.state !== s.id, (e) => e.text_color(t.muted))
@@ -703,7 +704,7 @@ export default class Issues extends View {
         .hover((s) => s.bg(t.hover))
         .tooltip("Sort (click to change)")
         .on_click((_e, cx) => { this.sort = nextSort(sort.id, triaged); this.reload(cx); cx.notify(); })
-        .child(`↕ ${sort.label}`));
+        .child(`↕ ${sort.label}`)));
     const err = this.error ?? this.listError ?? this.syncError;
     const status = h_flex().h(24).flex_none().px(12).gap(8).items_center().border_t(1).border_color(t.border)
       .text_size(11).text_color(t.dim)
