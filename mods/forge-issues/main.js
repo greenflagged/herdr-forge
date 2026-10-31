@@ -6,7 +6,7 @@ import {
 import {
   exec, props, theme, run, spaces, knownAgents, shared, setShared, appHome, window, readTextFile, openOverlay, notify,
 } from "herdr";
-import { forgeClient, projectOf, issueItem, actionList, matches, runAction, describe, actionLabel, ago, openUrl } from "./lib.js";
+import { forgeClient, projectOf, issueItem, actionList, matches, runAction, describe, actionLabel, ago, openUrl, stamp } from "./lib.js";
 import { Chrome, button, chip, note, staleError, dropdown } from "./ui.js";
 import {
   STATES, DEFAULT_SEP, sorts, nextSort, splitLabels, scopedChange, labelToggle, scopeValues, metaScopes,
@@ -681,7 +681,8 @@ export default class Issues extends View {
       .when(Boolean(r[LAUNCHED]), (e) => e.child(chip(t, "agent", t.working)))
       .when(r[REQS] > 0, (e) => e.child(div().flex_none().text_size(10.5).text_color(t.muted).child(`${look.reqPrefix}${r[REQS]}`)))
       .when(Boolean(r[TYPE]), (e) => e.child(chip(t, r[TYPE], r[TYPE] === "bug" ? t.ansi1 : t.muted)))
-      .child(div().w(32).flex_none().text_right().text_size(10.5).text_color(t.dim).child(ago(r[UPDATED])));
+      .child(div().id(`upd-${r[IID]}`).w(32).flex_none().text_right().text_size(10.5).text_color(t.dim)
+        .when(r[UPDATED] != null, (e) => e.tooltip(`Updated ${stamp(r[UPDATED])}`)).child(ago(r[UPDATED])));
   }
 
   list(t, tc) {
@@ -803,8 +804,8 @@ export default class Issues extends View {
         .child(div().text_color(i.state === "opened" ? t.ansi2 : t.ansi5).child(i.state === "opened" ? "Open" : "Closed"))
         .child(div().child(`#${i.iid}`))
         .when(Boolean(i.author), (e) => e.child(div().child(`by ${i.author}`)))
-        .when(i.created_ms != null, (e) => e.child(div().child(`opened ${since(i.created_ms)}`)))
-        .when(i.updated_ms != null, (e) => e.child(div().child(`updated ${since(i.updated_ms)}`)))
+        .when(i.created_ms != null, (e) => e.child(div().id("opened-at").tooltip(`Opened ${stamp(i.created_ms)}`).child(`opened ${since(i.created_ms)}`)))
+        .when(i.updated_ms != null, (e) => e.child(div().id("updated-at").tooltip(`Updated ${stamp(i.updated_ms)}`).child(`updated ${since(i.updated_ms)}`)))
         .when((i.assignees ?? []).length > 0, (e) => e.child(div().child(`→ ${i.assignees.join(", ")}`)))
         .when(busy, (e) => e.child(div().text_color(t.accent).child(`Saving to ${terms.name}…`))))
       .child(h_flex().gap(6).pt(6).flex_wrap()
@@ -873,7 +874,8 @@ export default class Issues extends View {
         .child(d.description ? TextView.markdown(`desc-${i.iid}`, d.description) : "No description."))
       .child(section(`Comments${d.notes?.length ? ` · ${d.notes.length}` : ""}`))
       .children((d.notes ?? []).map((n, k) => v_flex().id(`note-${k}`).gap(2).p(8).rounded(6).bg(t.raised)
-        .child(h_flex().gap(6).text_size(11).text_color(t.dim).child(div().text_color(t.muted).child(n.author)).child(div().child(since(n.at_ms))))
+        .child(h_flex().gap(6).text_size(11).text_color(t.dim).child(div().text_color(t.muted).child(n.author))
+          .child(div().id(`note-at-${k}`).when(n.at_ms != null, (e) => e.tooltip(stamp(n.at_ms))).child(since(n.at_ms))))
         .child(div().w_full().text_size(12).child(TextView.markdown(`note-${i.iid}-${k}`, n.body)))))
       .when(Boolean(d.error), (e) => e.child(staleError(t, d.error, { inset: 0 })))
       .child(v_flex().gap(6).pt(6)

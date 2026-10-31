@@ -1,7 +1,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, readTextFile, appHome, props, theme, window } from "herdr";
-import { forgeClient, projectOf, ago, clock, openUrl } from "./lib.js";
+import { forgeClient, projectOf, agoAt, clock, openUrl, stamp } from "./lib.js";
 import { Chrome, note, pill, staleError } from "./ui.js";
 import { pollEvery, arrange } from "./runners.js";
 
@@ -79,7 +79,8 @@ export default class Runners extends View {
     const since = j.status === "running" ? j.started_ms : j.created_ms;
     return h_flex().id(`job-${j.id}`).h(20).px(4).gap(6).items_center().rounded(4).text_size(11.5).cursor_pointer()
       .hover((s) => s.bg(t.hover))
-      .tooltip(`${j.group ?? ""} · ${j.name} · ${terms.ciRun} #${j.pipeline ?? "?"}`)
+      .tooltip(`${j.group ?? ""} · ${j.name} · ${terms.ciRun} #${j.pipeline ?? "?"}`
+        + (since == null ? "" : `\n${j.status === "running" ? "Started" : "Queued"} ${stamp(since)}`))
       .on_click((_e, cx) => { cx.stop_propagation(); openUrl(exec, j.url); })
       .child(div().flex_none().text_color(t.foreground).child(j.ref ?? ""))
       .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(j.name))
@@ -94,11 +95,11 @@ export default class Runners extends View {
     const mark = busy && !r.paused
       ? svg(`mods/${MOD}/spinner.svg`).size(10).flex_none().text_color(color).spin(900)
       : div().size(7).mx(1).flex_none().rounded(4).bg(color);
-    const seen = r.contacted_ms == null ? "" : ago(r.contacted_ms, now);
+    const seen = r.contacted_ms == null ? "" : agoAt(r.contacted_ms, now);
     const kind = this.project.provider === "gitlab" ? "gitlab-runner" : "runner";
     const tip = r.details
       ? `#${r.id} · ${kind} ${r.version ?? "?"} · ${r.platform ?? ""}/${r.arch ?? ""}` +
-        (seen ? ` · last seen ${seen === "now" ? "just now" : `${seen} ago`}` : "")
+        (seen ? ` · last seen ${seen}` : "")
       : `#${r.id}`;
     return v_flex().id(`runner-${r.id}`).px(8).py(6).gap(3).rounded(6).cursor_pointer()
       .hover((s) => s.bg(t.hover))

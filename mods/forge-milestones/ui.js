@@ -6,7 +6,7 @@
 import { div } from "gpui-kit";
 import { h_flex, v_flex, Popover } from "gpui-base";
 import { closeOverlay, layout, openOverlay, panes, props, run, setShared, shared, spaces } from "herdr";
-import { HEADER_PX, ago, expandedSize, findBlocks, isCollapsed, isShown } from "./lib.js";
+import { HEADER_PX, ago, agoAt, expandedSize, findBlocks, isCollapsed, isShown } from "./lib.js";
 
 export { HEADER_PX };
 const SIZES = "forge.sizes"; // shared: block id -> its size before collapsing
@@ -139,7 +139,7 @@ export class Chrome {
         .child(ago(at) === "now" ? "now" : ago(at))))
       .when(Boolean(onRefresh), (e) => e.child(loading
         ? div().w(20).flex_none().text_size(12).text_color(t.muted).flex().justify_center().child(div().frames(SPIN, 90))
-        : icon("refresh", "↻", at ? `Refresh (updated ${ago(at) === "now" ? "just now" : `${ago(at)} ago`})` : "Refresh",
+        : icon("refresh", "↻", at ? `Refresh · updated ${agoAt(at)}` : "Refresh",
           (cx) => onRefresh(cx))))
       .when(this.hovered && where === "block" && Boolean(this.block()), (e) => e
         .child(icon("pane", "⧉", "Open as a pane", () => this.openAsPane()))

@@ -3,7 +3,7 @@ import { v_flex, h_flex } from "gpui-base";
 import {
   exec, readTextFile, appHome, props, theme, shared, agents, terminals, panes, run, spaces, knownAgents, openOverlay, notify,
 } from "herdr";
-import { forgeClient, projectOf, actionList, matches, runAction, describe, actionLabel, fill, ago, openUrl } from "./lib.js";
+import { forgeClient, projectOf, actionList, matches, runAction, describe, actionLabel, fill, ago, agoAt, openUrl } from "./lib.js";
 import { Chrome, button, chip, note, pill, staleError } from "./ui.js";
 import {
   CI, defaultActions, mergeTip, checkoutOf, liveAgents, itemOf, agentPlaces, parseGitLook, ownersOf, askTarget, askText,
@@ -213,7 +213,7 @@ export default class ForgeRequests extends View {
     const [glyph, colorKey] = CI[ci.status];
     const color = t[colorKey] ?? t.dim;
     const what = ci.id != null ? ` · ${terms.ciRun} #${ci.id}` : "";
-    const when = ci.updated_ms ? `, ${ago(ci.updated_ms)} ago` : "";
+    const when = ci.updated_ms ? `, ${agoAt(ci.updated_ms)}` : "";
     return div().id(`ci-${r.iid}`).flex_none().px(2).rounded(3).text_size(12).text_color(color).cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .tooltip(`CI ${ci.status.replace(/_/g, " ")}${what}${when}`)
@@ -385,7 +385,7 @@ export default class ForgeRequests extends View {
               .child(div().flex_none().child(r.author ?? ""))
               .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(r.source ?? ""))
               .children((r.labels ?? []).slice(0, 3).map((l) => pill(t, l)))
-              .child(div().flex_none().text_size(10).text_color(t.dim).child(ago(r.updated_ms))))
+              .child(div().id(`upd-${r.iid}`).flex_none().text_size(10).text_color(t.dim).tooltip(`Updated ${agoAt(r.updated_ms)}`).child(ago(r.updated_ms))))
             .children(agentsOf(r).map((a) => this.agentRow(t, r, a)));
         }));
     }

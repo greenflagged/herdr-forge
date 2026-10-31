@@ -165,6 +165,97 @@ export function span(msec) {
   return h < 1 ? `${Math.max(1, Math.round(h * 60))}m` : h < 48 ? `${num(h, h < 10 ? 1 : 0)}h` : `${num(h / 24, 1)}d`;
 }
 
+// ---- times in the viewer's zone ----
+//
+// Ages ("2h") need no zone; anything absolute is local and says its zone. Herdr's engine
+// has no Intl (it's undefined, and toLocaleString ignores its options), but local Date
+// getters and getTimezoneOffset follow the OS zone, DST included. So the zone is
+// written from its offset: "UTC−7" (a real minus), "UTC+5:30", "UTC".
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DAY_MS = 86400000;
+
+function offsetLabel(min) { // min: getTimezoneOffset(), so UTC−7 is +420
+  if (!min) return "UTC";
+  const a = Math.abs(min), m = a % 60;
+  return `UTC${min > 0 ? "−" : "+"}${Math.floor(a / 60)}${m ? `:${String(m).padStart(2, "0")}` : ""}`;
+}
+
+// The viewer's zone at that moment (DST: January and July can differ).
+export function zoneLabel(ms = Date.now()) {
+  return offsetLabel(new Date(ms).getTimezoneOffset());
+}
+
+// "Oct 31, 1:40 PM UTC−7"; another year than now's adds it: "Oct 31 2025, 1:40 PM UTC−7".
+export function localTime(ms, now = Date.now()) {
+  if (ms == null || !Number.isFinite(ms)) return "";
+  const d = new Date(ms), h = d.getHours();
+  const year = d.getFullYear() !== new Date(now).getFullYear() ? ` ${d.getFullYear()}` : "";
+  return `${MONTHS[d.getMonth()]} ${d.getDate()}${year}, ${h % 12 || 12}:${String(d.getMinutes()).padStart(2, "0")} `
+    + `${h < 12 ? "AM" : "PM"} ${offsetLabel(d.getTimezoneOffset())}`;
+}
+
+// localTime, remembered: for tooltips built in render. Forgotten every hour (a new year,
+// a laptop that moved zones) and when it gets big.
+const seen = new Map();
+let seenUntil = 0;
+export function stamp(ms) {
+  if (ms == null) return "";
+  const now = Date.now();
+  if (now >= seenUntil || seen.size > 2000) { seen.clear(); seenUntil = now + 3600000; }
+  let s = seen.get(ms);
+  if (s === undefined) seen.set(ms, (s = localTime(ms, now)));
+  return s;
+}
+
+// A tooltip's age with the time itself: "2h ago (Oct 31, 1:40 PM UTC−7)".
+export function agoAt(ms, now = Date.now()) {
+  if (ms == null) return "";
+  const a = ago(ms, now);
+  return `${a === "now" ? "just now" : `${a} ago`} (${stamp(ms)})`;
+}
+
+// Due dates are calendar days ("YYYY-MM-DD"), not instants: never parse them as UTC
+// (`new Date("2026-11-01")` is Oct 31 in the Americas). -> [y, m (1-12), d] | null
+function ymd(date) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date ?? "");
+  return m ? [+m[1], +m[2], +m[3]] : null;
+}
+
+// "YYYY-MM-DD" -> that day's local midnight, epoch ms (for sorting). null if not a date.
+export function localDay(date) {
+  const d = ymd(date);
+  return d ? new Date(d[0], d[1] - 1, d[2]).getTime() : null;
+}
+
+// Whole calendar days from today (the viewer's) to that date: 0 today, -2 two days ago.
+// Counted on dates, so a DST change between them doesn't matter.
+export function daysUntil(date, now = Date.now()) {
+  const d = ymd(date);
+  if (!d) return null;
+  const t = new Date(now);
+  return Math.round((Date.UTC(d[0], d[1] - 1, d[2]) - Date.UTC(t.getFullYear(), t.getMonth(), t.getDate())) / DAY_MS);
+}
+
+// "Sat Nov 1", or "Sat Nov 1 2027" in another year than now's. No zone: it's a date.
+export function dateLabel(date, now = Date.now()) {
+  const d = ymd(date);
+  if (!d) return "";
+  const wd = WEEKDAYS[new Date(Date.UTC(d[0], d[1] - 1, d[2])).getUTCDay()];
+  return `${wd} ${MONTHS[d[1] - 1]} ${d[2]}${d[0] !== new Date(now).getFullYear() ? ` ${d[0]}` : ""}`;
+}
+
+// forge.py's `tz` argument for velocity buckets: the offset now, then the offset at each
+// local midnight that bounds the last `days` days (oldest first, through tomorrow's), so
+// days across a DST change still run midnight to midnight.
+export function tzArg(now = Date.now(), days = 30) {
+  const t = new Date(now), y = t.getFullYear(), m = t.getMonth(), d = t.getDate();
+  const offs = [t.getTimezoneOffset()];
+  for (let i = 0; i <= days; i++) offs.push(new Date(y, m, d - days + 1 + i).getTimezoneOffset());
+  return offs.join(",");
+}
+
 export function openUrl(exec, url) {
   if (!/^https?:\/\//.test(url ?? "")) return;
   exec("xdg-open", [url]).catch(() => exec("open", [url]).catch(() => {}));

@@ -63,6 +63,8 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
   error. It throws only when python can't run or the output isn't JSON.
 - `nocli: true` with the error: the forge's CLI isn't installed on that machine.
 - Times are epoch milliseconds (`*_ms`) everywhere; never `Date.parse` in a render.
+  On screen they're ages (`ago`) or the viewer's local time with its zone (`stamp`); due
+  dates are `"YYYY-MM-DD"` calendar days, never parsed as UTC (see lib.js).
 - **Reads take `maxAge` (seconds) and `force`.** The answer's `at` is when it was fetched
   (epoch seconds, 0: never).
   - **First read after `init`: `maxAge` `-1`.** Any cached answer comes back at once,
@@ -94,8 +96,8 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `runners P <maxAge> <force>` | `{runners: [Runner], jobs: [CiJob], at, error}` |
 | `milestones P <maxAge> <force>` | `{milestones: [Milestone], at, error}` |
 | `milestone-items P <title> <maxAge> <force>` | `{items: [MilestoneItem], at, error}` |
-| `velocity P <maxAge> <force> <12w\|30d> <nowMs> <tzOffsetMin>` | `{n, size, start, at, error, rows: [Row]}` with row keys `merged`, `closed`, `cycle` |
-| `commits <top> <ref> <12w\|30d> <nowMs> <tzOffsetMin> <force>` | `{n, size, start, at, error, row: Row, total}`: run on the repo's machine. No maxAge: it re-reads git every 5 min and fetches an `origin/*` ref every 15; an empty ref means HEAD |
+| `velocity P <maxAge> <force> <12w\|30d> <nowMs> <tz>` | `{n, size, start, edges, at, error, rows: [Row]}` with row keys `merged`, `closed`, `cycle` |
+| `commits <top> <ref> <12w\|30d> <nowMs> <tz> <force>` | `{n, size, start, edges, at, error, row: Row, total}`: run on the repo's machine. No maxAge: it re-reads git every 5 min and fetches an `origin/*` ref every 15; an empty ref means HEAD |
 | `sync P <since> <force>` | `{now, last_sync, error, changed, more, triage_at, triage_run}`: `changed` counts issues written after `since` (an issue the forge sends again unchanged isn't rewritten) |
 | `meta P` | `{labels: [{name, color, description}], milestones: [{id, title, due}], sep}` |
 | `query P <json>` | `{rows, offset, matched, total, counts, scopes, sep}` (below) |
@@ -149,7 +151,11 @@ LinkedRequest {iid, title, state, draft, source, url}
 forge: `created`, `waiting_for_resource`, `preparing`, `pending`, `running`, `success`,
 `failed`, `canceled`, `skipped`, `manual`, `scheduled`.
 
-Velocity buckets: bucket `i` covers `[start + i*size, start + (i+1)*size)`. `now` is the
+Velocity buckets: bucket `i` covers `[edges[i], edges[i+1])` (an older answer without
+`edges`: `[start + i*size, start + (i+1)*size)`). `30d` buckets are the viewer's calendar
+days, midnight to midnight, 23 or 25 hours across a DST change; `12w` ones are rolling weeks
+ending now. `tz` is `getTimezoneOffset()` now, then at each of the 31 midnights (lib.js's
+`tzArg()`), since forge.py may run on a machine in another zone. `now` is the
 last 7 days, `avg` the average week over 12 weeks (for `duration` rows, medians in ms).
 
 ### What the shapes mean on GitHub
@@ -217,6 +223,13 @@ mixes PRs into issues). Mods must cope with the nulls:
 - `requestItem(request, project)`, `issueItem(issue, project, sep)`: the fields actions see.
 - `ago(ms)` ("now", "3m", "2h", "5d": write "3m ago" yourself, and "now" alone),
   `clock(seconds)`, `span(ms)`, `num(x, digits)`, `openUrl(exec, url)`.
+- Times in the viewer's zone. Herdr's engine has no `Intl` (and `toLocaleString` ignores
+  its options), but local `Date` getters follow the OS zone with DST, so zones are named
+  from the offset: `zoneLabel(ms)` ("UTC−7", "UTC+5:30", "UTC"), `localTime(ms, now)`
+  ("Oct 31, 1:40 PM UTC−7", the year when it isn't this one), `stamp(ms)` (the same,
+  remembered: use it for tooltips built in render), `agoAt(ms)` ("2h ago (Oct 31, 1:40 PM
+  UTC−7)"). Due dates: `daysUntil(date)`, `dateLabel(date)` ("Sun Nov 1"), `localDay(date)`
+  (local midnight, for sorting). `tzArg(now)`: velocity's `tz`.
 - `checkoutOf(folder, spaces(), on, repo)`: where agents start when `props.folder` is
   missing: a space on `on` whose folder is named exactly `<name>` or `<owner>-<name>`
   (`shop` or `acme-shop` for `acme/shop`).

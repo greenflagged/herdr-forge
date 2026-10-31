@@ -518,6 +518,55 @@ class Forge(unittest.TestCase):
         ranks = dict(self.db().execute("SELECT iid, rank FROM triage"))
         self.assertEqual(ranks, {1: 2, 2: None, 3: None})
 
+    def test_context_says_which_zone_its_time_is_in(self):
+        self.sync_issues([issue(1)])
+        first = self.run_forge("context", *P, text=True, TZ="America/Los_Angeles").splitlines()[0]
+        self.assertRegex(first, r"\(cached \d{4}-\d\d-\d\dT\d\d:\d\d-0[78]:00\)$")
+
+
+class Times(unittest.TestCase):
+    """Day buckets in the viewer's zone, and due dates, called directly."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("forge", SCRIPT)
+        cls.f = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.f)
+
+    def test_days_run_midnight_to_midnight_across_dst(self):
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        la = ZoneInfo("America/Los_Angeles")
+        now = datetime(2026, 11, 10, 12, tzinfo=la)  # DST ended on Nov 1
+        midnights = [datetime(2026, 10, 12, tzinfo=la) + timedelta(days=i) for i in range(31)]
+        js_offset = lambda d: int(-d.utcoffset().total_seconds() // 60)  # getTimezoneOffset()
+        tz = ",".join(str(js_offset(d)) for d in [now, *midnights])  # what lib.js's tzArg sends
+        now_ms = int(now.timestamp() * 1000)
+        b = self.f.buckets("30d", now_ms, tz)
+        self.assertEqual(b[3], [int(d.timestamp() * 1000) for d in midnights])
+        self.assertEqual(b[2], b[3][0])
+        late = int(datetime(2026, 10, 31, 23, 30, tzinfo=la).timestamp() * 1000)
+        early = int(datetime(2026, 11, 2, 0, 30, tzinfo=la).timestamp() * 1000)
+        row = self.f.count_row("x", [late, early, now_ms], b, now_ms)["values"]
+        self.assertEqual(row[19], 1, "11:30 PM on Oct 31 counts on Oct 31")
+        self.assertEqual(row[21], 1, "12:30 AM on Nov 2 counts on Nov 2")
+        self.assertEqual(row[29], 1)
+        # The offset alone (an older mod): equal days from today's midnight, as before.
+        old = self.f.buckets("30d", now_ms, "480")
+        self.assertEqual(old[3][-2], int(datetime(2026, 11, 10, tzinfo=la).timestamp() * 1000))
+        self.assertEqual(old[3][1] - old[3][0], self.f.DAY)
+        weeks = self.f.buckets("12w", now_ms, tz)
+        self.assertEqual((weeks[0], weeks[3][-1]), (12, now_ms))
+
+    def test_github_due_dates_keep_the_day_that_was_picked(self):
+        day = self.f.gh_day
+        self.assertEqual(day("2026-11-01T00:00:00Z"), "2026-11-01")
+        self.assertEqual(day("2026-11-01T07:00:00Z"), "2026-11-01", "midnight in California")
+        self.assertEqual(day("2015-09-07T21:00:00Z"), "2015-09-08", "midnight east of UTC, the day before in UTC")
+        self.assertEqual(day("2026-10-31T12:00:00Z"), "2026-11-01", "midnight in New Zealand")
+        self.assertIsNone(day(None))
+
 
 if __name__ == "__main__":
     unittest.main()
