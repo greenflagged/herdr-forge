@@ -834,7 +834,7 @@ export default class Issues extends View {
       .children((d.notes ?? []).map((n, k) => v_flex().id(`note-${k}`).gap(2).p(8).rounded(6).bg(t.raised)
         .child(h_flex().gap(6).text_size(11).text_color(t.dim).child(div().text_color(t.muted).child(n.author)).child(div().child(since(n.at_ms))))
         .child(div().w_full().text_size(12).child(TextView.markdown(`note-${i.iid}-${k}`, n.body)))))
-      .when(Boolean(d.error), (e) => e.child(staleError(t, d.error).px(0)))
+      .when(Boolean(d.error), (e) => e.child(staleError(t, d.error, { inset: 0 })))
       .child(v_flex().gap(6).pt(6)
         .child(div().id("comment-box").rounded(6).border_1().border_color(t.border).p(6).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())

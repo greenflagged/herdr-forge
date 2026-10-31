@@ -113,7 +113,7 @@ export class Chrome {
     run("pane.split", { direction: "right", mod: this.mod, props: { ...p, asPane: true } });
   }
 
-  // The header. title: string; count, sub (the project), at (ms of the data), loading,
+  // The header. title: string; count (a number or text such as "12/80"), sub (the project), at (ms of the data), loading,
   // onRefresh(cx), extra: elements placed before the buttons (range pills, say).
   header(t, { title, count = null, sub = "", at = null, loading = false, onRefresh = null, extra = [] }) {
     if (this.rail()) return this.railView(t, title, count);
@@ -139,7 +139,7 @@ export class Chrome {
         ? div().w(20).flex_none().text_size(12).text_color(t.muted).flex().justify_center().child(div().frames(SPIN, 90))
         : icon("refresh", "↻", at ? `Refresh (updated ${ago(at) === "now" ? "just now" : `${ago(at)} ago`})` : "Refresh",
           (cx) => onRefresh(cx))))
-      .when(this.hovered && where === "block", (e) => e
+      .when(this.hovered && where === "block" && Boolean(this.block()), (e) => e
         .child(icon("pane", "⧉", "Open as a pane", () => this.openAsPane()))
         .child(icon("detach", "↗", "Detach into a window", (cx) => this.detach(cx))))
       .when(where === "window", (e) => e.child(icon("dock", "↙", "Dock it back", () => this.dock())));
@@ -185,8 +185,8 @@ export function note(t, text, { error = false } = {}) {
 }
 
 // An error above data that's still shown (stale data stays; this says why it's stale).
-export function staleError(t, text) {
-  return div().px(12).py(4).text_size(11).text_color(t.ansi1).truncate().tooltip(text).child(text);
+export function staleError(t, text, { inset = 12 } = {}) {
+  return div().px(inset).py(4).text_size(11).text_color(t.ansi1).truncate().tooltip(text).child(text);
 }
 
 // A single-choice dropdown: the current value (with its color dot) and a list on click.
