@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+ba2e96775ba2"
+VERSION = "0.1.0+bd63feb60af1"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -1068,6 +1068,9 @@ MIGRATIONS = [[
       status TEXT DEFAULT 'proposed', at REAL, locked INTEGER DEFAULT 0)""",
     "CREATE TABLE IF NOT EXISTS merged(iid INTEGER PRIMARY KEY, merged_ms INTEGER, created_ms INTEGER)",
     "CREATE TABLE IF NOT EXISTS closed(iid INTEGER PRIMARY KEY, closed_ms INTEGER)",
+], [
+    # Merge commits a project's deploy check said are live: final, so never checked again.
+    "CREATE TABLE IF NOT EXISTS deploys(sha TEXT PRIMARY KEY, at REAL, text TEXT)",
 ]]
 
 ISSUE_COLS = "iid,title,state,labels,milestone,assignees,author,created_at,updated_at,closed_at,notes,requests,weight,blocking,url"
@@ -1219,7 +1222,24 @@ class Project:
     def merged(self, max_age, force):
         rows, at, err = self.cached("merged", max_age, lambda: self.forge.merged(time.time() - MERGED_DAYS * 86400),
                                     [], force)
+        # What the deploy check already confirmed, read fresh (not part of the cached answer).
+        shas = [r["merge_sha"] for r in rows if r.get("merge_sha")]
+        done = {}
+        if shas:
+            q = f"SELECT sha, at, text FROM deploys WHERE sha IN ({','.join('?' * len(shas))})"
+            done = {sha: {"at_ms": int(t * 1000), "text": text} for sha, t, text in self.db.execute(q, shas)}
+        for r in rows:
+            r["deployed"] = done.get(r.get("merge_sha"))
         return {"merged": rows, "at": at, "error": err}
+
+    def deployed(self, sha, text):
+        """Records that a merge commit is live (the deploy check said so)."""
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha or ""):
+            raise RuntimeError(f"bad commit {sha!r}")
+        self.db.execute("INSERT OR IGNORE INTO deploys(sha, at, text) VALUES(?,?,?)", (sha, time.time(), one_line(text or "")[:200]))
+        self.db.execute("DELETE FROM deploys WHERE at < ?", (time.time() - 90 * 86400,))
+        self.db.commit()
+        return {"ok": True}
 
     def merge(self, iid, sha):
         text = self.forge.merge(iid, sha)
@@ -1831,6 +1851,7 @@ def main(argv):
         "requests": lambda: p.requests(age(0), force(1)),
         "merge": lambda: p.merge(int(a[0]), a[1] if len(a) > 1 else ""),
         "merged": lambda: p.merged(age(0), force(1)),
+        "deployed": lambda: p.deployed(a[0], a[1] if len(a) > 1 else ""),
         "order": lambda: p.order(age(0), force(1), a[2] if len(a) > 2 else ""),
         "pipelines": lambda: p.pipelines(age(0), force(1)),
         "jobs": lambda: p.jobs(int(a[0]), age(1), force(2)),

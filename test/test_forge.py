@@ -127,6 +127,20 @@ class Forge(unittest.TestCase):
         self.assertEqual(sum("diffs" in c for c in self.calls()), n)
         self.assertEqual(sum(c.endswith("projects/acme%2Fshop") for c in self.calls()), 1, "merge method asked once a day")
 
+    def test_a_confirmed_deploy_is_remembered(self):
+        now = time.time() * 1000
+        self.routes([[r"merge_requests\?state=merged", {"out": [mr(7, merged_at=iso(now), merge_commit_sha="abc1234")]}],
+                     [r"pipelines\?ref=main", {"out": []}]])
+        self.assertIsNone(self.run_forge("merged", *P, 600, 0)["merged"][0]["deployed"])
+        self.assertEqual(self.run_forge("deployed", *P, "abc1234", "Flux runs abc1234\nmore"), {"ok": True})
+        self.run_forge("deployed", *P, "abc1234", "a later check")
+        n = len(self.calls())
+        d = self.run_forge("merged", *P, 600, 0)["merged"][0]["deployed"]
+        self.assertEqual(d["text"], "Flux runs abc1234 more", "the first answer stays, on one line")
+        self.assertGreater(d["at_ms"], now - 60000)
+        self.assertEqual(len(self.calls()), n, "read with the cached list, no forge call")
+        self.assertIn("bad commit", self.run_forge("deployed", *P, "../x", "")["error"])
+
     def test_merge_drops_the_merged_list(self):
         self.routes([[r"merge_requests\?state=merged", {"out": []}], [r"mr merge", {"out": "Merged"}]])
         self.run_forge("merged", *P, 600, 0)

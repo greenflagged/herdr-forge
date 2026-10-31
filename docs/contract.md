@@ -99,6 +99,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `merge P <iid> <sha>` | `{ok, text}` |
 | `order P <maxAge> <force> [pattern]` | `{requests: {iid: Order}, targets: [{ref, folder, files}], at, error}`: for the open requests (the cached list); `targets`: the file names on each target branch in every folder where an open request has a path matching `pattern` |
 | `merged P <maxAge> <force>` | `{merged: [Merged], at, error}`: merged in the last 7 days, newest first |
+| `deployed P <sha> <text>` | `{ok}`: records that the deploy check said this merge commit is live. Final: `merged` returns it as `deployed` from then on, and the panel stops checking. Kept 90 days |
 | `pipelines P <maxAge> <force>` | `{pipelines: [Pipeline], at, error}` |
 | `jobs P <pipelineId> <maxAge> <force>` | `{jobs: [Job], at, error}` |
 | `pipeline-act P <pipelineId> retry\|cancel` | `{ok}` |
@@ -143,10 +144,11 @@ Order      {sha, behind, rebase, files[]}   behind: commits the target gained si
            or behind on a fast-forward / semi-linear project; GitHub BEHIND); files: paths it
            changes, both sides of a rename (GitHub: the first 100)
 Merged     {iid, title, url, author, source, target, fork, head_sha, merge_sha, merged_ms,
-            ci: {id, status, url, updated_ms} | null}
+            ci: {id, status, url, updated_ms} | null, deployed: {at_ms, text} | null}
            merge_sha: what landed on target (the merge or squash commit; the head for a
            fast-forward); ci: the newest pipeline for merge_sha on target (GitLab), the merge
-           commit's rolled-up checks (GitHub, id null), null when none ran
+           commit's rolled-up checks (GitHub, id null), null when none ran;
+           deployed: {at_ms, text} once `deployed` recorded it, else null
 Pipeline   {id, iid, ref, sha, status, source, updated_ms, url, name?} ref: "main" or "!811";
            source: "request" (an MR/PR pipeline), else the forge's word (push, schedule, web...);
            name: the workflow's name (GitHub only)

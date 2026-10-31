@@ -153,6 +153,11 @@ export default class ForgeRequests extends View {
         }
         const was = this.checks.get(m.merge_sha)?.state;
         this.checks.set(m.merge_sha, { ...res, at: Date.now() });
+        if (res.state === "yes") {
+          // Remembered on the forge machine, so a restart (or another window) doesn't check again.
+          const { provider, host, repo } = project;
+          try { await this.forge(["deployed", provider, host, repo, m.merge_sha, res.text ?? ""], { on: project.on }); } catch {}
+        }
         if (res.state === "yes" && was && was !== "yes") {
           const { terms } = projectOf(p);
           try { notify({ title: `Deployed · ${terms.reqPrefix}${m.iid}`, body: m.title ?? "", level: "success" }); } catch {}
@@ -281,7 +286,13 @@ export default class ForgeRequests extends View {
       cx.notify();
       try {
         const out = await this.forge(["merged", provider, host, repo, maxAge, force ? 1 : 0], { on });
-        if (Array.isArray(out?.merged)) this.merged = out.merged;
+        if (Array.isArray(out?.merged)) {
+          this.merged = out.merged;
+          // Confirmed before (by this window or another): final, no need to check again.
+          for (const m of this.merged) {
+            if (m.deployed && m.merge_sha) this.checks.set(m.merge_sha, { state: "yes", text: m.deployed.text || null, at: m.deployed.at_ms });
+          }
+        }
         this.mergedError = out?.error ?? null;
       } catch (e) {
         this.mergedError = message(e);
