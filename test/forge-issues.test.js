@@ -108,6 +108,16 @@ test("the shipped skill carries the package version and the stable CLI form", ()
   assert.doesNotMatch(main, /gf\.|gf-issues|setTimeout|setInterval/);
 });
 
+test("the panel uses the shared chrome and parts, not local copies", () => {
+  const main = read("../mods/forge-issues/main.js");
+  assert.match(main, /from "\.\/ui\.js"/);
+  assert.match(main, /new Chrome\(MOD/);
+  assert.match(main, /chrome\.visible\(\)/, "polling follows the header's collapse and visibility");
+  assert.doesNotMatch(main, /Popover|isShown|^\s+(chip|button)\(t, /m, "dropdowns, chips and buttons come from ui.js");
+  assert.doesNotMatch(main, /issues-sync/, "the header's ↻ replaces the footer's Sync");
+  assert.match(main, /triaged\(tc\) \? section\("triage"/, "the triage facet waits for a triage run");
+});
+
 test("usesPriority and isAgentAction", () => {
   assert.equal(usesPriority({ "scope:priority": { "(none)": 4 } }, [], "::"), false);
   assert.equal(usesPriority({ "scope:priority": { high: 1 } }, [], "::"), true);

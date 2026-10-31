@@ -1,9 +1,13 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Popover, InputState, Input, TextareaState, Textarea, TextView, Scrollbar, v_virtual_list, h_resizable, resizable_panel } from "gpui-base";
 import {
-  exec, props, theme, run, spaces, panes, layout, knownAgents, shared, setShared, appHome, window, readTextFile, openOverlay,
+  v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle,
+  h_resizable, resizable_panel,
+} from "gpui-base";
+import {
+  exec, props, theme, run, spaces, knownAgents, shared, setShared, appHome, window, readTextFile, openOverlay, notify,
 } from "herdr";
-import { forgeClient, projectOf, issueItem, actionList, matches, runAction, describe, ago, openUrl, isShown } from "./lib.js";
+import { forgeClient, projectOf, issueItem, actionList, matches, runAction, describe, ago, openUrl } from "./lib.js";
+import { Chrome, button, chip, note, staleError, dropdown } from "./ui.js";
 import {
   STATES, DEFAULT_SEP, sorts, nextSort, splitLabels, scopedChange, labelToggle, scopeValues, metaScopes,
   orderScopes, scopeTitle, facetEntries, togglePick, listQuery, triageConfig, skillLine, usesPriority, isAgentAction, scopeOf,
@@ -17,6 +21,8 @@ import {
 //   scopeSep: "::"                     the scoped-label separator (default: the forge's)
 //   triage: true | { agent, task, tab } the optional triage agent (off by default)
 //   issue: 123                         open this issue at once (a link into the tab from another mod)
+// Keys on the list: ↑/↓ or j/k move the selection, / searches, Esc clears the search,
+// Enter opens the selected issue in the browser.
 // forge.py keeps the issues in SQLite on `on` and does the filtering, counting and
 // sorting: Herdr's JS engine is far too slow for that. This view keeps only the rows it
 // has fetched and the open issue. Every edit goes to the forge first; the cache keeps
@@ -35,6 +41,8 @@ const ACCEPT_ROUNDS = 20; // accept-all answers `more` after ~18 s of work: call
 const [IID, TITLE, STATE, PRIO, TYPE, REQS, UPDATED, PROPOSED, LAUNCHED] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
 const msg = (e) => String(e?.message ?? e);
+// A toast besides the inline notice (the toast mod may be off: never let that break a write).
+const toast = (title, body, level) => { try { notify({ title, body, level }); } catch { /* no toasts */ } };
 const since = (ms) => { const a = ago(ms); return a === "now" ? "just now" : `${a} ago`; };
 
 export default class Issues extends View {
@@ -72,10 +80,20 @@ export default class Issues extends View {
     this.notice = null;          // an action's result
     this.published = undefined; // what forge-issues.selected was last set to (JSON)
     this.skill = null;           // `skill status` of the triage skill
+    this.triageRun = null;       // the triage agent's last run (sync): triage facets wait for one
+    this.picker = { open: null }; // which detail dropdown is open
+    this.openAt = 0;             // a keyboard move opens its issue after a pause (ms)
+    this.chrome = new Chrome(MOD, { repo: props()?.repo }, { width: 1100, height: 700 });
+    this.chrome.attach(cx);
+    this.keys = cx.focus_handle();
+    this.scroll = VirtualListScrollHandle.new();
+    this.inputFocused = false;
     const { terms } = this.project();
     this.forge = forgeClient({ exec, readTextFile }, `${appHome()}/mods/${MOD}/forge.py`);
     this.input = InputState.new({ placeholder: "Search issues (title, text, #iid)" });
     this.input.on("change", () => { this.typedAt = Date.now(); this.pendingQuery = this.input.value().trim(); });
+    this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx?.notify(); });
+    this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx?.notify(); });
     this.comment = TextareaState.new({ placeholder: `Comment (written to ${terms.name})`, rows: 3 });
 
     // Stale first: what SQLite has now, then a sync with the forge.
@@ -91,6 +109,7 @@ export default class Issues extends View {
     // Searching waits for a pause in typing; the next page waits for the list to need it.
     cx.timer.every(150, (cx) => {
       if (this.wantMore) { this.wantMore = false; this.more(cx); }
+      if (this.openAt && Date.now() >= this.openAt) { this.openAt = 0; if (this.selected) this.open(this.selected, cx); }
       if (this.pendingQuery != null && Date.now() - this.typedAt >= 200) {
         this.query = this.pendingQuery;
         this.pendingQuery = null;
@@ -121,10 +140,9 @@ export default class Issues extends View {
     return props()?.scopeSep ?? this.sepSeen ?? DEFAULT_SEP[this.project().provider] ?? "::";
   }
 
+  // On screen and not collapsed (a detached window counts).
   shown() {
-    try {
-      return isShown(layout(), MOD, { repo: this.project().repo }, { panes: panes(), spaces: spaces() });
-    } catch { return true; }
+    try { return this.chrome.visible(); } catch { return true; }
   }
 
   // A project command: [cmd, ...args] -> forge.py cmd provider host repo ...args, on `on`.
@@ -234,7 +252,9 @@ export default class Issues extends View {
       this.adding = false;
       this.confirming = null;
       this.notice = null;
+      this.picker.open = null;
     }
+    this.openAt = 0;
     this.selected = iid;
     this.detailError = null;
     cx.notify();
@@ -287,6 +307,7 @@ export default class Issues extends View {
       } catch (e) {
         if (this.selected === i.iid) this.setDetail(before);
         this.error = `#${i.iid} not updated: ${msg(e)}`;
+        toast(`#${i.iid} not updated`, msg(e), "error");
       } finally {
         this.busy = false;
         cx.notify();
@@ -328,8 +349,10 @@ export default class Issues extends View {
         this.comment.set_value("");
         this.event("commented", i.iid);
         this.reload(cx);
+        toast(`Commented on #${i.iid}`, i.title, "success");
       } catch (e) {
         this.error = `Comment not posted: ${msg(e)}`;
+        toast(`Comment on #${i.iid} not posted`, msg(e), "error");
       } finally {
         this.busy = false;
         cx.notify();
@@ -366,8 +389,10 @@ export default class Issues extends View {
         }
         if (r.text) this.notice = r.text;
         this.event("action", i.iid, { action: a.id });
+        toast(`${a.label} #${i.iid}`, r.text ?? (r.tab ? `Started in tab ${r.tab}` : "Done"), "success");
       } catch (e) {
         this.error = `${a.label} #${i.iid}: ${msg(e)}`;
+        toast(`${a.label} #${i.iid} failed`, msg(e), "error");
       } finally {
         this.busy = false;
         cx.notify();
@@ -448,8 +473,11 @@ export default class Issues extends View {
           cx.notify();
         }
         this.triageNotice = `Accepted ${accepted.length}${failed.length ? `, ${failed.length} failed: ${failed[0].error}` : ""}`;
+        toast(`Accepted ${accepted.length} triage proposal${accepted.length === 1 ? "" : "s"}`,
+          failed.length ? `${failed.length} failed: ${failed[0].error}` : undefined, failed.length ? "warning" : "success");
       } catch (e) {
         this.error = `Accept all: ${msg(e)}`;
+        toast("Accept all failed", msg(e), "error");
       } finally {
         this.accepting = false;
         if (accepted.length) this.event("updated", null, { iids: accepted });
@@ -478,24 +506,64 @@ export default class Issues extends View {
     });
   }
 
+  // ---- the keyboard (on the list) ----
+
+  // ↑/↓ and j/k move; the issue opens after a pause so a held key doesn't fetch every row.
+  move(delta, cx) {
+    const rows = this.rows;
+    if (!rows.length) return;
+    const at = rows.findIndex((r) => r[IID] === this.selected);
+    const k = at < 0 ? (delta > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, at + delta));
+    if (k > rows.length - 30) this.wantMore = true;
+    if (rows[k][IID] !== this.selected) {
+      this.selected = rows[k][IID];
+      this.detail = null;
+      this.detailError = null;
+      this.adding = false;
+      this.confirming = null;
+      this.notice = null;
+      this.picker.open = null;
+      this.openAt = Date.now() + 250;
+    }
+    this.scroll.scroll_to_item(k);
+    cx.notify();
+  }
+
+  clearSearch(cx) {
+    this.input.set_value("");
+    this.pendingQuery = null;
+    if (this.query) { this.query = ""; this.reload(cx); }
+    this.keys.focus();
+    cx.notify();
+  }
+
+  onKey(e, cx) {
+    const key = e.keystroke;
+    const handled = () => cx.stop_propagation();
+    if (key === "escape") {
+      if (this.picker.open) { this.picker.open = null; cx.notify(); return handled(); }
+      if (this.inputFocused || this.query || this.pendingQuery) { this.clearSearch(cx); return handled(); }
+      return;
+    }
+    if (key === "up" || key === "down") { this.move(key === "up" ? -1 : 1, cx); return handled(); }
+    if (this.inputFocused) return; // the rest are typing
+    if (key === "j" || key === "k") { this.move(key === "k" ? -1 : 1, cx); return handled(); }
+    if (key === "/" || e.key_char === "/") { this.input.focus(); return handled(); }
+    if (key === "enter") {
+      const url = this.detail?.issue?.iid === this.selected ? this.detail.issue.url : null;
+      if (url) openUrl(exec, url);
+      return handled();
+    }
+  }
+
   // ---- drawing ----
 
   prioColor(t, p) {
     return { blocker: t.ansi1, critical: t.ansi1, high: t.ansi3, medium: t.ansi4, low: t.dim }[p] ?? t.dim;
   }
 
-  chip(t, text, color) {
-    return div().flex_none().px(5).rounded(4).border_1().border_color(t.border).text_size(10.5).text_color(color ?? t.muted).child(text);
-  }
-
-  button(t, id, label, onClick, opts = {}) {
-    return div().id(id).flex_none().px(8).py(2).rounded(5).text_size(11.5).cursor_pointer()
-      .bg(opts.primary ? t.solid : t.raised).text_color(opts.primary ? t.solid_foreground : t.foreground)
-      .hover((s) => s.opacity(0.85))
-      .when(Boolean(opts.tooltip), (e) => e.tooltip(opts.tooltip))
-      .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
-      .child(label);
-  }
+  // Triage facets, the Triage rank sort and proposal chips wait for a triage run.
+  triaged(tc) { return Boolean(tc && this.triageRun); }
 
   sidebar(t, tc) {
     const section = (group, title) => {
@@ -519,7 +587,7 @@ export default class Issues extends View {
         .on_click((_e, cx) => { this.picked = {}; this.reload(cx); cx.notify(); }).child("Clear filters")))
       .when(Boolean(tc), (e) => e.child(this.triageBox(t, tc)))
       .children([
-        tc ? section("triage", "Triage") : null,
+        this.triaged(tc) ? section("triage", "Triage") : null,
         ...scopes.map((s) => section(`scope:${s}`, scopeTitle(s))),
         section("milestone", "Milestone"),
         section("labels", "Labels"),
@@ -533,9 +601,7 @@ export default class Issues extends View {
     const open = this.launchTab(tc.tab);
     const { terms } = this.project();
     const skill = skillLine(this.skill);
-    const btn = (id, label, onClick, primary) => div().id(id).px(8).py(3).rounded(5).text_size(11.5).cursor_pointer()
-      .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.85))
-      .on_click((_e, cx) => onClick(cx)).child(label);
+    const btn = (id, label, onClick, primary) => button(t, id, label, onClick, { tone: primary ? "primary" : null });
     return v_flex().gap(6).mx(4).mb(6).p(8).rounded(8).border_1().border_color(t.border)
       .child(h_flex().gap(6).items_center()
         .child(div().flex_1().text_size(11.5).font_semibold().child("Triage agent"))
@@ -582,49 +648,50 @@ export default class Issues extends View {
         .when(!p, (e) => e.border_1().border_color(t.dim))))
       .child(div().w(40).flex_none().text_size(11).text_color(t.dim).child(`#${r[IID]}`))
       .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(r[STATE] === "closed" ? t.muted : t.foreground).child(r[TITLE]))
-      .when(look.triage && Boolean(r[PROPOSED]), (e) => e.child(this.chip(t, `→ ${r[PROPOSED]}`, t.accent)))
-      .when(Boolean(r[LAUNCHED]), (e) => e.child(this.chip(t, "agent", t.working)))
+      .when(look.triage && Boolean(r[PROPOSED]), (e) => e.child(chip(t, `→ ${r[PROPOSED]}`, t.accent)))
+      .when(Boolean(r[LAUNCHED]), (e) => e.child(chip(t, "agent", t.working)))
       .when(r[REQS] > 0, (e) => e.child(div().flex_none().text_size(10.5).text_color(t.muted).child(`${look.reqPrefix}${r[REQS]}`)))
-      .when(Boolean(r[TYPE]), (e) => e.child(this.chip(t, r[TYPE], r[TYPE] === "bug" ? t.ansi1 : t.muted)))
+      .when(Boolean(r[TYPE]), (e) => e.child(chip(t, r[TYPE], r[TYPE] === "bug" ? t.ansi1 : t.muted)))
       .child(div().w(32).flex_none().text_right().text_size(10.5).text_color(t.dim).child(ago(r[UPDATED])));
   }
 
   list(t, tc) {
-    const sortList = sorts(Boolean(tc));
+    const triaged = this.triaged(tc);
+    const sortList = sorts(triaged);
     const sort = sortList.find((s) => s.id === this.sort) ?? sortList[0];
     const header = h_flex().h(40).flex_none().px(10).gap(8).items_center().border_b(1).border_color(t.border)
       .child(div().id("issues-search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .when(this.inputFocused, (e) => e.border_color(t.accent))
         .child(Input.new(this.input).h_full().text_size(12.5).text_color(t.foreground)))
       .child(h_flex().flex_none().rounded(6).border_1().border_color(t.border).children(STATES.map((s) =>
         div().id(`st-${s.id}`).px(8).py(3).text_size(11.5).cursor_pointer()
           .when(this.state === s.id, (e) => e.bg(t.selected).text_color(t.foreground))
           .when(this.state !== s.id, (e) => e.text_color(t.muted))
+          .hover((st) => st.text_color(t.foreground))
           .on_click((_e, cx) => { this.state = s.id; this.reload(cx); cx.notify(); }).child(s.label))))
       .child(div().id("issues-sort").flex_none().px(8).py(3).rounded(6).text_size(11.5).text_color(t.muted).cursor_pointer()
         .hover((s) => s.bg(t.hover))
         .tooltip("Sort (click to change)")
-        .on_click((_e, cx) => { this.sort = nextSort(sort.id, Boolean(tc)); this.reload(cx); cx.notify(); })
+        .on_click((_e, cx) => { this.sort = nextSort(sort.id, triaged); this.reload(cx); cx.notify(); })
         .child(`↕ ${sort.label}`));
     const err = this.error ?? this.listError ?? this.syncError;
-    const status = h_flex().h(24).flex_none().px(12).gap(8).items_center().text_size(11).text_color(t.dim)
+    const status = h_flex().h(24).flex_none().px(12).gap(8).items_center().border_t(1).border_color(t.border)
+      .text_size(11).text_color(t.dim)
       .child(div().flex_none().child(`${this.matched} of ${this.total}`))
       .child(div().id("issues-error").flex_1().min_w(0).truncate().text_color(err ? t.ansi1 : t.dim)
-        .when(Boolean(this.error), (e) => e.cursor_pointer().tooltip(`${this.error}\n(click to dismiss)`)
-          .on_click((_e, cx) => { this.error = null; cx.notify(); }))
-        .child(err ?? (this.lastSync ? `synced ${since(this.lastSync)}` : "")))
-      .child(div().id("issues-sync").flex_none().cursor_pointer().hover((s) => s.text_color(t.foreground))
-        .on_click((_e, cx) => { if (!this.loadedOnce) this.reload(cx); this.sync(cx, true); })
-        .child(this.syncing ? (this.syncMore ? "Syncing (more)…" : "Syncing…") : "Sync"));
+        .when(Boolean(err), (e) => e.tooltip(this.error ? `${this.error}\n(click to dismiss)` : err))
+        .when(Boolean(this.error), (e) => e.cursor_pointer().on_click((_e, cx) => { this.error = null; cx.notify(); }))
+        .child(err ?? (this.syncing && this.syncMore ? "Fetching more from the forge…" : "")));
     const rows = this.rows, n = this.matched;
     const look = {
       prio: usesPriority(this.counts, this.labels, this.sep()),
-      triage: Boolean(tc),
+      triage: triaged,
       reqPrefix: this.project().terms.reqPrefix,
     };
     const body = !n
-      ? div().p(16).text_color(t.muted).child(this.loadFailed ? "Couldn't load issues: see below, then Sync to retry."
-        : this.loadedOnce ? (this.total ? "No issues match." : this.syncing ? "Fetching issues…" : "No issues.") : "Loading issues…")
+      ? div().flex_1().min_h(0).child(note(t, this.loadFailed ? "Couldn't load issues: see below, then ↻ to retry."
+        : this.loadedOnce ? (this.total ? "No issues match." : this.syncing ? "Fetching issues…" : "No issues.") : "Loading issues…"))
       : div().flex_1().min_h(0).relative()
         .child(v_virtual_list("issues-list", n, ROW, (k) => (rows[k] ? String(rows[k][IID]) : `row-${k}`),
           // Rows can't have handlers or start work here: clicks come through
@@ -634,18 +701,21 @@ export default class Issues extends View {
             const out = [];
             for (let k = range.start; k < range.end; k++) out.push(this.row(t, rows[k], k, look));
             return out;
-          }).size_full().px(4)
-          .on_item_click((key, cx) => { if (/^\d+$/.test(key)) this.open(Number(key), cx); }))
+          }).size_full().px(4).track_scroll(this.scroll)
+          .on_item_click((key, cx) => { this.keys.focus(); if (/^\d+$/.test(key)) this.open(Number(key), cx); }))
         .child(Scrollbar.vertical("issues-list").viewport_from_layout().absolute().inset_0());
-    return v_flex().size_full().min_h(0).child(header).child(body).child(status);
+    // The keyboard: the column holds the focus (clicking a row or Esc gives it back), and
+    // keys typed in the search box pass through here too.
+    return v_flex().id("issues-keys").size_full().min_h(0).track_focus(this.keys)
+      .on_key_down((e, cx) => this.onKey(e, cx))
+      .child(header).child(body).child(status);
   }
 
   detailPane(t, tc) {
-    if (!this.selected) return div().p(16).text_color(t.dim).child("Select an issue.");
+    if (!this.selected) return note(t, "Select an issue (↑/↓ or j/k on the list).");
     const d = this.detail;
     if (!d) {
-      return div().p(16).text_color(this.detailError ? t.ansi1 : t.dim)
-        .child(this.detailError ? `#${this.selected}: ${this.detailError}` : `Loading #${this.selected}…`);
+      return this.detailError ? note(t, `#${this.selected}: ${this.detailError}`, { error: true }) : note(t, `Loading #${this.selected}…`);
     }
     const i = d.issue;
     const sep = this.sep();
@@ -660,38 +730,10 @@ export default class Issues extends View {
     const launches = d.launches ?? [];
     const requestAgents = shared("forge.requestAgents") ?? {};
 
-    // One value per field (a scoped label holds one), so each is a dropdown: the current
-    // value with its color, and a list of the others when clicked.
-    const dot = (color) => div().size(7).rounded(4).flex_none().bg(color);
-    const pickRow = (title, options, current, onPick) => {
-      const id = `pick-${title}`;
-      const open = this.picking === id;
-      const cur = options.find(([v]) => v === current) ?? [null, "none"];
-      const trigger = h_flex().id(`${id}-trigger`).gap(6).items_center().px(6).py(1).rounded(4).text_size(11.5)
-        .cursor_pointer().border_1().border_color(open ? t.accent : t.border).hover((s) => s.bg(t.hover))
-        .when(Boolean(cur[2]), (e) => e.child(dot(cur[2])))
-        .child(div().max_w(220).truncate().text_color(current == null ? t.muted : t.foreground).child(cur[1]))
-        .child(div().text_size(9).text_color(t.dim).child("▾"));
-      const list = v_flex().id(`${id}-list`).min_w(160).max_h(320).overflow_y_scrollbar().p(4).gap(1).rounded(6)
-        .bg(t.popover).border_1().border_color(t.border).shadow_md()
-        .children(options.map(([value, label, color]) => h_flex().id(`${id}-${label}`).gap(6).items_center()
-          .px(8).py(3).rounded(4).text_size(11.5).cursor_pointer()
-          .when(value === current, (e) => e.bg(t.selected))
-          .hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => {
-            this.picking = null;
-            if (value !== current) onPick(value, cx);
-            cx.notify();
-          })
-          .child(color ? dot(color) : div().size(7).flex_none())
-          .child(div().flex_1().min_w(0).truncate().text_color(value == null ? t.muted : t.foreground).child(label))
-          .when(value === current, (e) => e.child(div().text_size(10).text_color(t.dim).child("✓")))));
-      return h_flex().gap(6).items_center()
-        .child(div().w(64).flex_none().text_size(11).text_color(t.dim).truncate().child(title))
-        .child(Popover.new(id).open(open)
-          .on_open_change((o, cx) => { this.picking = o ? id : this.picking === id ? null : this.picking; cx.notify(); })
-          .trigger(trigger).content(list));
-    };
+    // One value per field (a scoped label holds one), so each is a dropdown.
+    const pickRow = (title, options, current, onPick) => h_flex().gap(6).items_center()
+      .child(div().w(64).flex_none().text_size(11).text_color(t.dim).truncate().child(title))
+      .child(dropdown(t, `pick-${title}`, options, current, onPick, this.picker));
 
     const scopes = orderScopes(this.scopes, props()?.scopes, [...metaScopes(this.labels, sep), ...Object.keys(scoped)]);
     const scopeRow = (scope) => {
@@ -719,7 +761,7 @@ export default class Issues extends View {
     return v_flex().id("issue-detail").size_full().min_h(0).overflow_y_scrollbar().p(14).gap(6)
       .child(h_flex().gap(8).items_start()
         .child(div().flex_1().min_w(0).text_size(15).font_semibold().child(i.title))
-        .child(this.button(t, "open-issue", "↗", () => openUrl(exec, i.url), { tooltip: `Open in ${terms.name}` })))
+        .child(button(t, "open-issue", "↗", () => openUrl(exec, i.url), { tooltip: `Open in ${terms.name}` })))
       .child(h_flex().gap(8).text_size(11).text_color(t.muted).flex_wrap()
         .child(div().text_color(i.state === "opened" ? t.ansi2 : t.ansi5).child(i.state === "opened" ? "Open" : "Closed"))
         .child(div().child(`#${i.iid}`))
@@ -729,13 +771,14 @@ export default class Issues extends View {
         .when((i.assignees ?? []).length > 0, (e) => e.child(div().child(`→ ${i.assignees.join(", ")}`)))
         .when(busy, (e) => e.child(div().text_color(t.accent).child(`Saving to ${terms.name}…`))))
       .child(h_flex().gap(6).pt(6).flex_wrap()
-        .children(actions.map((a) => this.button(t, `act-${a.id}`, a.label, (cx) => this.act(i, a, cx),
-          { primary: Boolean(a.primary), tooltip: describe(a) })))
-        .child(this.button(t, "state", i.state === "opened" ? "Close issue" : "Reopen", (cx) => this.setState(i, cx))))
+        .children(actions.map((a) => button(t, `act-${a.id}`, a.label, (cx) => this.act(i, a, cx),
+          { tone: a.tone ?? (a.primary ? "primary" : null), tooltip: describe(a) })))
+        .child(button(t, "state", i.state === "opened" ? "Close issue" : "Reopen", (cx) => this.setState(i, cx))))
       .when(Boolean(confirming), (e) => e.child(h_flex().gap(6).items_center().p(8).rounded(6).border_1().border_color(t.accent).text_size(11.5)
         .child(div().flex_1().min_w(0).child(typeof confirming.confirm === "string" ? confirming.confirm : `${confirming.label}?`))
-        .child(this.button(t, "confirm-no", "Cancel", (cx) => { this.confirming = null; cx.notify(); }))
-        .child(this.button(t, "confirm-yes", confirming.label, (cx) => this.act(i, confirming, cx), { primary: true }))))
+        .child(button(t, "confirm-no", "Cancel", (cx) => { this.confirming = null; cx.notify(); }))
+        .child(button(t, "confirm-yes", confirming.label, (cx) => this.act(i, confirming, cx),
+          { tone: confirming.tone ?? "primary" }))))
       .when(Boolean(this.notice), (e) => e.child(div().text_size(11.5).text_color(t.muted).child(this.notice)))
       .when(launches.length > 0, (e) => e.children(launches.map((l, k) => {
         const where = this.launchTab(l.tab);
@@ -751,8 +794,8 @@ export default class Issues extends View {
       .when(proposal?.status === "proposed" && Boolean(proposal?.priority), (e) => e.child(v_flex().gap(4).p(8).rounded(6).border_1().border_color(t.accent)
         .child(h_flex().gap(6).items_center().text_size(11.5)
           .child(div().flex_1().child(`Triage suggests priority${sep}${proposal.priority}${proposal.rank ? ` (rank ${proposal.rank})` : ""}`))
-          .child(this.button(t, "tri-yes", "Accept", (cx) => this.answerTriage(i, true, cx), { primary: true }))
-          .child(this.button(t, "tri-no", "Dismiss", (cx) => this.answerTriage(i, false, cx))))
+          .child(button(t, "tri-yes", "Accept", (cx) => this.answerTriage(i, true, cx), { tone: "primary" }))
+          .child(button(t, "tri-no", "Dismiss", (cx) => this.answerTriage(i, false, cx))))
         .when(Boolean(proposal.reason), (e) => e.child(div().text_size(11.5).text_color(t.muted).child(proposal.reason)))))
       .child(section("Fields"))
       .children(scopeRows)
@@ -781,7 +824,7 @@ export default class Issues extends View {
             .on_click(() => openUrl(exec, m.url))
             .child(div().flex_none().text_color(color).child(`${terms.reqPrefix}${m.iid}`))
             .child(div().flex_1().min_w(0).truncate().child(m.title))
-            .children(agentsOn.map((a) => this.chip(t, a.name ?? a.address, t.working)))
+            .children(agentsOn.map((a) => chip(t, a.name ?? a.address, t.working)))
             .child(div().flex_none().text_size(10.5).text_color(color).child(m.draft && m.state === "opened" ? "draft" : m.state));
         })))
       .child(section("Description"))
@@ -791,25 +834,33 @@ export default class Issues extends View {
       .children((d.notes ?? []).map((n, k) => v_flex().id(`note-${k}`).gap(2).p(8).rounded(6).bg(t.raised)
         .child(h_flex().gap(6).text_size(11).text_color(t.dim).child(div().text_color(t.muted).child(n.author)).child(div().child(since(n.at_ms))))
         .child(div().w_full().text_size(12).child(TextView.markdown(`note-${i.iid}-${k}`, n.body)))))
-      .when(Boolean(d.error), (e) => e.child(div().text_size(11).text_color(t.ansi1).child(d.error)))
+      .when(Boolean(d.error), (e) => e.child(staleError(t, d.error).px(0)))
       .child(v_flex().gap(6).pt(6)
         .child(div().id("comment-box").rounded(6).border_1().border_color(t.border).p(6).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .child(Textarea.new(this.comment).w_full().text_size(12).text_color(t.foreground)))
-        .child(h_flex().justify_end().child(this.button(t, "post-comment", busy ? "Posting…" : "Comment", (cx) => this.postComment(i, cx)))));
+        .child(h_flex().justify_end().child(button(t, "post-comment", busy ? "Posting…" : "Comment", (cx) => this.postComment(i, cx)))));
   }
 
   render() {
     const t = theme();
     const { repo, host, provider } = this.project();
-    const empty = (text) => div().p(16).bg(t.background).text_color(t.muted).size_full().child(text);
-    if (!repo) return empty("No repo set (props.repo).");
-    if (!provider) return empty(`${host} isn't a forge herdr-forge supports yet.`);
+    const filtered = this.matched !== this.total;
+    const header = this.chrome.header(t, {
+      title: "Issues", count: this.loadedOnce ? (filtered ? `${this.matched}/${this.total}` : this.total) : null,
+      sub: repo, at: this.lastSync || null, loading: this.syncing,
+      onRefresh: repo && provider ? (cx) => { if (!this.loadedOnce) this.reload(cx); this.sync(cx, true); } : null,
+    });
+    const frame = (body) => v_flex().id("issues").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+      .child(header).when(Boolean(body), (e) => e.child(body));
+    if (this.chrome.collapsed()) return frame(null);
+    if (!repo) return frame(note(t, "No repo set (props.repo)."));
+    if (!provider) return frame(note(t, `${host} isn't a forge herdr-forge supports yet.`));
     const tc = this.triage();
-    return div().size_full().bg(t.background).text_color(t.foreground).text_size(13)
+    return frame(div().flex_1().min_h(0)
       .child(h_resizable("forge-issues").size_full()
         .child(resizable_panel().size(210).size_range(150, 320).child(this.sidebar(t, tc)))
         .child(resizable_panel().child(this.list(t, tc)))
-        .child(resizable_panel().size(480).size_range(320, 900).child(div().size_full().border_l(1).border_color(t.border).child(this.detailPane(t, tc)))));
+        .child(resizable_panel().size(480).size_range(320, 900).child(div().size_full().border_l(1).border_color(t.border).child(this.detailPane(t, tc))))));
   }
 }
