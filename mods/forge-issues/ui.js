@@ -31,9 +31,11 @@ export class Chrome {
   // Call in init: layout changes don't redraw mods, so look for a collapse or dock made
   // elsewhere (a key, another window) once a second.
   attach(cx) {
+    let drawn = Date.now();
     cx.timer.every(1000, (cx) => {
       const now = `${this.where()}|${this.collapsed()}`;
-      if (now !== this.seen) { this.seen = now; cx.notify(); }
+      // And every 30 s, so the header's "3m" stays true.
+      if (now !== this.seen || Date.now() - drawn >= 30000) { this.seen = now; drawn = Date.now(); cx.notify(); }
     });
   }
 
