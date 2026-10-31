@@ -17,11 +17,11 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+27702386d0ec"
+VERSION = "0.1.0+7e6f228dc515"
 
 import json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 
 # The cache holds issue text and comments, some of them private: nothing we write is
 # readable by other users of the machine.
@@ -207,33 +207,30 @@ def cycle_row(key, pairs, b, now_ms):
 
 # ---- providers: each turns its forge's API into the shapes in docs/contract.md ----
 
-class GitLab:
-    name = "gitlab"
-    cli = "glab"
-    sep = "::"
+class Cli:
+    """Talks to a forge through its logged-in CLI (`glab api` / `gh api`), which both take
+    the same flags."""
+    name = cli = sep = None
 
     def __init__(self, p):
         self.p = p
-        self.project = "projects/" + urllib.parse.quote(p.repo, safe="")
-        self.url = f"https://{p.host}/{p.repo}"
-
-    # -- transport --
 
     @staticmethod
     def retry_after(err):
         """Seconds to wait when an error is the forge's rate limit, else None."""
         return 120 if re.search(r"\b429\b.*(too many|rate)|too many requests", err, re.I) else None
 
-    def run(self, argv):
+    def run(self, argv, stdin=None):
         self.p.check_backoff()
         try:
-            r = subprocess.run(["glab", *argv], capture_output=True, text=True, env=ENV, timeout=CLI_TIMEOUT)
+            r = subprocess.run([self.cli, *argv], capture_output=True, text=True, env=ENV, timeout=CLI_TIMEOUT,
+                               input=stdin, stdin=None if stdin is not None else subprocess.DEVNULL)
         except FileNotFoundError:
-            raise NoCli("glab isn't installed on this machine")
+            raise NoCli(f"{self.cli} isn't installed on this machine")
         except subprocess.TimeoutExpired:
-            raise RuntimeError(f"glab took longer than {CLI_TIMEOUT}s")
+            raise RuntimeError(f"{self.cli} took longer than {CLI_TIMEOUT}s")
         if r.returncode != 0:
-            err = (r.stderr or r.stdout).strip() or f"glab exited {r.returncode}"
+            err = (r.stderr or r.stdout).strip() or f"{self.cli} exited {r.returncode}"
             wait = self.retry_after(err)
             if wait:
                 self.p.backoff(wait)
@@ -242,17 +239,20 @@ class GitLab:
 
     def json(self, text):
         try:
-            return json.loads(text or "null")
+            return json.loads((text or "").strip() or "null")  # an empty 201/204 is no answer
         except ValueError:
-            raise RuntimeError(f"glab's answer isn't JSON: {text[:120]!r}")
+            raise RuntimeError(f"{self.cli}'s answer isn't JSON: {text[:120]!r}")
 
-    def api(self, path, method="GET", fields=None):
+    def api(self, path, method="GET", fields=None, body=None):
+        """fields: string form fields; body: a JSON request body (sent on stdin)."""
         argv = ["api", "--hostname", self.p.host]
         if method != "GET":
             argv += ["-X", method]
         for k, v in (fields or {}).items():
             argv += ["-f", f"{k}={v}"]
-        return self.json(self.run(argv + [path]))
+        if body is not None:
+            argv += ["--input", "-"]
+        return self.json(self.run(argv + [path], None if body is None else json.dumps(body)))
 
     def pages(self, path, per=100):
         """Yields one page at a time, so callers can save progress and stop on budget."""
@@ -269,6 +269,7 @@ class GitLab:
         return [x for batch in self.pages(path, per) for x in batch]
 
     def gql(self, query, variables=None):
+        query = " ".join(query.split())  # one line: queries are written over several
         argv = ["api", "--hostname", self.p.host, "graphql", "-f", f"query={query}"]
         for k, v in (variables or {}).items():
             if v is not None:
@@ -277,6 +278,21 @@ class GitLab:
         if out.get("errors"):
             raise RuntimeError(out["errors"][0].get("message", "GraphQL error"))
         return out["data"]
+
+    def may_stick(self, job):
+        """Whether a pending job that none of the project's runners can take is stuck."""
+        return True
+
+
+class GitLab(Cli):
+    name = "gitlab"
+    cli = "glab"
+    sep = "::"
+
+    def __init__(self, p):
+        super().__init__(p)
+        self.project = "projects/" + urllib.parse.quote(p.repo, safe="")
+        self.url = f"https://{p.host}/{p.repo}"
 
     # -- merge requests --
 
@@ -492,13 +508,378 @@ class GitLab:
         self.api(f"{self.project}/issues/{iid}/notes", "POST", {"body": body})
 
 
-class GitHub:
+# GitHub's run and job words -> the GitLab CI words the shapes use.
+GH_QUEUED = {"in_progress": "running", "queued": "pending", "requested": "pending", "pending": "pending",
+             "waiting": "waiting_for_resource"}
+GH_CONCLUSION = {"success": "success", "failure": "failed", "timed_out": "failed", "startup_failure": "failed",
+                 "cancelled": "canceled", "stale": "canceled", "skipped": "skipped", "neutral": "skipped",
+                 "action_required": "manual"}
+GH_ROLLUP = {"SUCCESS": "success", "FAILURE": "failed", "ERROR": "failed", "PENDING": "running", "EXPECTED": "pending"}
+GH_STATE = {"OPEN": "opened", "CLOSED": "closed", "MERGED": "merged"}
+
+
+def gh_status(status, conclusion):
+    if status == "completed":
+        return GH_CONCLUSION.get(conclusion, "failed")
+    return GH_QUEUED.get(status, "pending")
+
+
+def gh_day(iso):
+    """A GitHub due date ("2026-11-01T07:00:00Z") as "YYYY-MM-DD"."""
+    return iso[:10] if iso else None
+
+
+def gh_since(iso):
+    """Any ISO time as the UTC form GitHub's search takes."""
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class GitHub(Cli):
+    """GitHub through `gh`. What each shape means here is in docs/contract.md: requests'
+    CI is the head commit's rolled-up check status, a pipeline is one workflow run, a job's
+    group is its workflow, runners need admin rights."""
     name = "github"
     cli = "gh"
     sep = ": "
 
     def __init__(self, p):
-        raise RuntimeError("GitHub support is coming in a later release")
+        super().__init__(p)
+        parts = p.repo.split("/")
+        if len(parts) != 2:
+            raise RuntimeError(f"a GitHub repository is owner/name, not {p.repo}")
+        self.vars = {"o": parts[0], "n": parts[1]}
+        self.repo = f"repos/{p.repo}"
+        self.url = f"https://{p.host}/{p.repo}"
+        self._labels = {}  # runner id -> its details, from the last runners list
+
+    @staticmethod
+    def retry_after(err):
+        if re.search(r"secondary rate limit|abuse detection", err, re.I):
+            return 120
+        if re.search(r"rate limit exceeded|\b429\b", err, re.I):
+            return 600  # the primary limit resets hourly; one failing call per 10 minutes
+        return None
+
+    def repository(self, query, **variables):
+        """repository(owner, name) {...} with the query's own variables."""
+        r = self.gql(query, {**self.vars, **variables})["repository"]
+        if not r:
+            raise RuntimeError(f"repository {self.p.repo} not found")
+        return r
+
+    # -- pull requests --
+
+    PR_Q = """query($o:String!,$n:String!){repository(owner:$o,name:$n){pullRequests(states:OPEN,first:50,
+      orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number title url isDraft mergeable autoMergeRequest{enabledAt}
+      headRefName baseRefName headRefOid isCrossRepository author{login} labels(first:30){nodes{name}}
+      createdAt updatedAt commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}"""
+
+    def requests(self):
+        out = []
+        for m in self.repository(self.PR_Q)["pullRequests"]["nodes"]:
+            commit = ((m.get("commits") or {}).get("nodes") or [{}])[-1].get("commit") or {}
+            rollup = commit.get("statusCheckRollup")
+            out.append({
+                "iid": m["number"], "title": m["title"], "url": m["url"], "draft": bool(m.get("isDraft")),
+                "auto_merge": bool(m.get("autoMergeRequest")),
+                # UNKNOWN while GitHub works it out: not a conflict yet.
+                "conflicts": m.get("mergeable") == "CONFLICTING",
+                "source": m.get("headRefName"), "target": m.get("baseRefName"), "sha": m.get("headRefOid"),
+                "fork": bool(m.get("isCrossRepository")),
+                "author": (m.get("author") or {}).get("login"),
+                "labels": [l["name"] for l in (m.get("labels") or {}).get("nodes") or []],
+                "created_ms": ms(m["createdAt"]), "updated_ms": ms(m["updatedAt"]),
+                # The checks come with the PR, so request_ci has nothing to add.
+                "ci": {"id": None, "status": GH_ROLLUP.get(rollup["state"], "pending"), "url": f"{m['url']}/checks",
+                       "updated_ms": ms(m["updatedAt"])} if rollup else None,
+            })
+        return out
+
+    def request_ci(self):
+        return {}
+
+    def merge(self, iid, sha):
+        """Merges with the first method the repository allows (merge, squash, rebase). While
+        required checks still run, turns on auto-merge instead, as glab does."""
+        repo = self.api(self.repo)
+        method = next((m for m, k in (("merge", "allow_merge_commit"), ("squash", "allow_squash_merge"),
+                                      ("rebase", "allow_rebase_merge")) if repo.get(k, m == "merge")), "merge")
+        body = {"merge_method": method, **({"sha": sha} if sha else {})}
+        try:
+            out = self.api(f"{self.repo}/pulls/{iid}/merge", "PUT", body=body)
+        except Busy:
+            raise
+        except RuntimeError as e:
+            if not re.search(r"status checks?\b|merge queue", str(e), re.I):
+                raise
+            pr = self.api(f"{self.repo}/pulls/{iid}")
+            try:
+                self.gql("mutation($id:ID!,$m:PullRequestMergeMethod!,$sha:GitObjectID){enablePullRequestAutoMerge("
+                         "input:{pullRequestId:$id,mergeMethod:$m,expectedHeadOid:$sha}){clientMutationId}}",
+                         {"id": pr["node_id"], "m": method.upper(), "sha": sha or None})
+            except RuntimeError:
+                raise e
+            return "Set to merge when checks pass"
+        return (out or {}).get("message") or "Merged"
+
+    # -- CI: workflow runs --
+
+    def run_out(self, r):
+        prs = r.get("pull_requests") or []
+        from_pr = r.get("event") in ("pull_request", "pull_request_target")
+        return {"id": r["id"], "iid": r.get("run_number"),
+                # A fork's PR run has no pull_requests: its branch name is all there is.
+                "ref": f"#{prs[0]['number']}" if from_pr and prs else (r.get("head_branch") or ""),
+                "sha": r.get("head_sha"), "status": gh_status(r.get("status"), r.get("conclusion")),
+                "source": "request" if from_pr else (r.get("event") or ""),
+                "updated_ms": ms(r.get("updated_at")), "url": r["html_url"], "name": r.get("name")}
+
+    def pipelines(self):
+        return [self.run_out(r) for r in self.api(f"{self.repo}/actions/runs?per_page=20")["workflow_runs"]]
+
+    def jobs(self, pid):
+        jobs = self.api(f"{self.repo}/actions/runs/{pid}/jobs?per_page=100")["jobs"]
+        jobs.sort(key=lambda j: j["id"])
+        out = []
+        for j in jobs:
+            start, end = ms(j.get("started_at")), ms(j.get("completed_at"))
+            out.append({"id": j["id"], "name": j["name"], "group": j.get("workflow_name"),
+                        "status": gh_status(j.get("status"), j.get("conclusion")),
+                        "duration": (end - start) / 1000 if start and end and j.get("status") == "completed" else None,
+                        "allow_failure": False, "url": j["html_url"]})
+        return out
+
+    def pipeline_act(self, pid, what):
+        base = f"{self.repo}/actions/runs/{pid}"
+        if what == "cancel":
+            self.api(f"{base}/cancel", "POST")
+            return
+        # Retry what failed, like GitLab; a run with nothing failed reruns whole.
+        try:
+            self.api(f"{base}/rerun-failed-jobs", "POST")
+        except Busy:
+            raise
+        except RuntimeError:
+            self.api(f"{base}/rerun", "POST")
+
+    @staticmethod
+    def runner_info(r):
+        labels = [l["name"].lower() for l in r.get("labels") or []]
+        return {"tags": labels, "run_untagged": True, "version": None, "platform": r.get("os"),
+                "arch": next((l for l in labels if l in ("x64", "arm64", "arm", "x86")), None), "contacted_ms": None}
+
+    def runners(self):
+        """Self-hosted runners only: GitHub's own aren't the project's. Needs admin rights."""
+        out = []
+        for r in self.api(f"{self.repo}/actions/runners?per_page=100")["runners"]:
+            self._labels[r["id"]] = self.runner_info(r)
+            out.append({"id": r["id"], "name": r.get("name") or f"#{r['id']}", "status": r.get("status"),
+                        "paused": False, "url": f"{self.url}/settings/actions/runners/{r['id']}"})
+        return out
+
+    def runner_details(self, rid):
+        return self._labels.get(rid) or self.runner_info(self.api(f"{self.repo}/actions/runners/{rid}"))
+
+    def ci_jobs(self):
+        runs = []
+        for status in ("in_progress", "queued"):
+            runs += self.api(f"{self.repo}/actions/runs?status={status}&per_page=20")["workflow_runs"]
+
+        def jobs_of(r):
+            if over_budget():
+                return r, []
+            return r, self.api(f"{self.repo}/actions/runs/{r['id']}/jobs?per_page=100")["jobs"]
+
+        out = []
+        with ThreadPoolExecutor(4) as pool:
+            for r, jobs in pool.map(jobs_of, runs):
+                ref = self.run_out(r)["ref"]
+                for j in jobs:
+                    if j.get("status") == "completed":
+                        continue
+                    running = j.get("status") == "in_progress"
+                    out.append({
+                        "id": j["id"], "name": j["name"], "group": j.get("workflow_name"),
+                        "status": "running" if running else "pending",
+                        "started_ms": ms(j.get("started_at")) if running else None,
+                        "created_ms": ms(j.get("created_at") or j.get("started_at")),
+                        "tags": [l.lower() for l in j.get("labels") or []],
+                        "runner": {"id": j["runner_id"], "name": j.get("runner_name")} if j.get("runner_id") else None,
+                        "ref": ref, "pipeline": r["id"], "url": j["html_url"]})
+        return out
+
+    def may_stick(self, job):
+        # Jobs for GitHub's own runners (ubuntu-latest...) never need one of ours.
+        return "self-hosted" in job["tags"]
+
+    # -- milestones --
+
+    MILESTONE_Q = ("query($o:String!,$n:String!,$after:String){repository(owner:$o,name:$n){milestones(states:OPEN,"
+                   "first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{number title dueOn url"
+                   " open:issues(states:OPEN){totalCount} closed:issues(states:CLOSED){totalCount}}}}}")
+
+    def milestones(self):
+        # GraphQL: the REST counts include pull requests, GitLab's (and the panel's) are issues.
+        out, after = [], None
+        while True:
+            conn = self.repository(self.MILESTONE_Q, after=after)["milestones"]
+            for m in conn["nodes"]:
+                o, c = m["open"]["totalCount"], m["closed"]["totalCount"]
+                out.append({"id": m["number"], "title": m["title"], "due": gh_day(m.get("dueOn")), "url": m["url"],
+                            "open": o, "closed": c, "all": o + c})
+            if not conn["pageInfo"]["hasNextPage"]:
+                return out
+            after = conn["pageInfo"]["endCursor"]
+
+    def milestone_items(self, title):
+        number = next((m["number"] for m in self.all_pages(f"{self.repo}/milestones?state=all") if m["title"] == title), None)
+        if number is None:
+            return []
+        items = [i for i in self.api(f"{self.repo}/issues?milestone={number}&state=all&sort=updated&per_page=100")
+                 if "pull_request" not in i]
+        items.sort(key=lambda i: i["state"] != "open")
+        return [{"id": i["id"], "iid": i["number"], "title": i["title"],
+                 "state": "opened" if i["state"] == "open" else "closed",
+                 "assignees": [a["login"] for a in i.get("assignees") or []], "url": i["html_url"]} for i in items]
+
+    # -- velocity (search; GitHub stops a search at 1000 results) --
+
+    SEARCH_Q = ("query($q:String!,$after:String){search(query:$q,type:ISSUE,first:100,after:$after){"
+                "pageInfo{hasNextPage endCursor} nodes{... on PullRequest{number mergedAt createdAt}"
+                " ... on Issue{number closedAt}}}}")
+
+    def _search(self, q, after):
+        out = []
+        while True:
+            conn = self.gql(self.SEARCH_Q, {"q": q, "after": after})["search"]
+            out += [n for n in conn["nodes"] if n]
+            if not conn["pageInfo"]["hasNextPage"]:
+                return out, None
+            after = conn["pageInfo"]["endCursor"]
+            if over_budget():
+                return out, after
+
+    def merged_since(self, since_iso, after=None):
+        nodes, after = self._search(f"repo:{self.p.repo} is:pr is:merged merged:>={gh_since(since_iso)}", after)
+        return [(n["number"], ms(n["mergedAt"]), ms(n["createdAt"])) for n in nodes if n.get("mergedAt")], after
+
+    def closed_since(self, since_iso, after=None):
+        nodes, after = self._search(f"repo:{self.p.repo} is:issue is:closed closed:>={gh_since(since_iso)}", after)
+        return [(n["number"], ms(n["closedAt"])) for n in nodes if n.get("closedAt")], after
+
+    # -- issues (GraphQL: no pull requests mixed in, and linked PR counts) --
+
+    ISSUE_F = """fragment I on Issue{number databaseId title body state url createdAt updatedAt closedAt
+      labels(first:50){nodes{name}} milestone{number title dueOn} assignees(first:20){nodes{login}}
+      author{login} comments{totalCount} closedByPullRequestsReferences(first:1,includeClosedPrs:true){totalCount}}"""
+    PR_F = "fragment P on PullRequest{number title state isDraft headRefName url repository{nameWithOwner}}"
+
+    def issue(self, n):
+        m = n.get("milestone")
+        return {
+            "iid": n["number"], "id": n.get("databaseId"), "title": n["title"], "description": n.get("body") or "",
+            "state": "opened" if n["state"] == "OPEN" else "closed",
+            "labels": [l["name"] for l in n["labels"]["nodes"]],
+            "milestone": {"id": m["number"], "title": m["title"], "due": gh_day(m.get("dueOn"))} if m else None,
+            "assignees": [a["login"] for a in n["assignees"]["nodes"]],
+            "author": (n.get("author") or {}).get("login"),
+            "created_at": n["createdAt"], "updated_at": n["updatedAt"], "closed_at": n.get("closedAt"),
+            "notes": n["comments"]["totalCount"],
+            "requests": (n.get("closedByPullRequestsReferences") or {}).get("totalCount", 0),
+            "weight": None, "blocking": None, "url": n["url"],
+        }
+
+    def issue_pages(self, cursor):
+        """Pages of issues changed since `cursor` (inclusive), oldest change first."""
+        q = ("query($o:String!,$n:String!,$since:DateTime,$after:String){repository(owner:$o,name:$n){"
+             "issues(first:100,after:$after,orderBy:{field:UPDATED_AT,direction:ASC},filterBy:{since:$since}){"
+             "pageInfo{hasNextPage endCursor} nodes{...I}}}}" + self.ISSUE_F)
+        after = None
+        while True:
+            conn = self.repository(q, since=cursor or None, after=after)["issues"]
+            yield [self.issue(n) for n in conn["nodes"]]
+            if not conn["pageInfo"]["hasNextPage"]:
+                return
+            after = conn["pageInfo"]["endCursor"]
+
+    def issue_get(self, iid):
+        q = "query($o:String!,$n:String!,$i:Int!){repository(owner:$o,name:$n){issue(number:$i){...I}}}" + self.ISSUE_F
+        n = self.repository(q, i=int(iid))["issue"]
+        if not n:
+            raise RuntimeError(f"#{iid} not found")
+        return self.issue(n)
+
+    def issue_iids(self):
+        q = ("query($o:String!,$n:String!,$after:String){repository(owner:$o,name:$n){"
+             "issues(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{number}}}}")
+        alive, after = set(), None
+        while True:
+            page = self.repository(q, after=after)["issues"]
+            alive |= {n["number"] for n in page["nodes"]}
+            if not page["pageInfo"]["hasNextPage"]:
+                return alive
+            if over_budget():
+                return None  # not all of them: drop nothing
+            after = page["pageInfo"]["endCursor"]
+
+    def labels(self):
+        return [{"name": l["name"], "color": "#" + (l.get("color") or "888888"), "description": l.get("description")}
+                for l in self.all_pages(f"{self.repo}/labels")]
+
+    def active_milestones(self):
+        return [{"id": m["number"], "title": m["title"], "due": gh_day(m.get("due_on"))}
+                for m in self.all_pages(f"{self.repo}/milestones?state=open")]
+
+    def issue_detail(self, iid):
+        comments = self.all_pages(f"{self.repo}/issues/{iid}/comments")
+        q = ("query($o:String!,$n:String!,$i:Int!){repository(owner:$o,name:$n){issue(number:$i){"
+             "closedByPullRequestsReferences(first:20,includeClosedPrs:true){nodes{...P}}"
+             " timelineItems(first:50,itemTypes:[CROSS_REFERENCED_EVENT,CONNECTED_EVENT]){nodes{"
+             "... on CrossReferencedEvent{source{... on PullRequest{...P}}}"
+             " ... on ConnectedEvent{subject{... on PullRequest{...P}}}}}}}}" + self.PR_F)
+        issue = self.repository(q, i=int(iid))["issue"] or {}
+        prs = list((issue.get("closedByPullRequestsReferences") or {}).get("nodes") or [])
+        for n in (issue.get("timelineItems") or {}).get("nodes") or []:
+            prs.append((n or {}).get("source") or (n or {}).get("subject"))
+        reqs, seen = [], set()
+        for r in prs:
+            # Only this repository's: another repo's #12 isn't our #12.
+            if not r or not r.get("number") or r["number"] in seen or \
+                    ((r.get("repository") or {}).get("nameWithOwner") or "").lower() != self.p.repo.lower():
+                continue
+            seen.add(r["number"])
+            reqs.append({"iid": r["number"], "title": r["title"], "state": GH_STATE.get(r.get("state"), "opened"),
+                         "draft": bool(r.get("isDraft")), "source": r.get("headRefName"), "url": r["url"]})
+        return {
+            "notes": [{"author": (c.get("user") or {}).get("login"), "body": c.get("body") or "", "at_ms": ms(c["created_at"])}
+                      for c in comments],
+            "requests": reqs,
+        }
+
+    def issue_update(self, iid, f):
+        """f: {add_labels: [..], remove_labels: [..], milestone: number | None, state: "opened" | "closed"}"""
+        base = f"{self.repo}/issues/{iid}"
+        if f.get("add_labels"):
+            self.api(f"{base}/labels", "POST", body={"labels": f["add_labels"]})
+        for label in f.get("remove_labels") or []:
+            try:
+                self.api(f"{base}/labels/{urllib.parse.quote(label, safe='')}", "DELETE")
+            except Busy:
+                raise
+            except RuntimeError as e:
+                if "404" not in str(e):  # already gone
+                    raise
+        patch = {}
+        if "milestone" in f:
+            patch["milestone"] = f["milestone"]
+        if f.get("state"):
+            patch["state"] = "closed" if f["state"] == "closed" else "open"
+        if patch:
+            self.api(base, "PATCH", body=patch)
+        return self.issue_get(iid)
+
+    def issue_comment(self, iid, body):
+        self.api(f"{self.repo}/issues/{iid}/comments", "POST", body={"body": body})
 
 
 PROVIDERS = {"gitlab": GitLab, "github": GitHub}
@@ -637,7 +1018,7 @@ class Project:
         reqs, at, err = self.cached("requests", max_age, self.forge.requests, [], force)
         ci = self.cached("request-ci", max_age, self.forge.request_ci, {}, force)[0]
         for r in reqs:
-            r["ci"] = ci.get(r["sha"])
+            r["ci"] = ci.get(r["sha"]) or r.get("ci")  # GitHub's comes with the request
         return {"requests": reqs, "at": at, "error": err}
 
     def merge(self, iid, sha):
@@ -691,7 +1072,8 @@ class Project:
                         self.db.execute("INSERT OR REPLACE INTO cache(k, at, json, shape, lease) VALUES(?,?,?,?,0)",
                                         (self.key(f"runner:{rid}"), now, json.dumps(d), SHAPES))
             self.db.commit()
-        loaded = True
+        # No runner list at all (no rights, say): we can't tell what's stuck.
+        loaded = bool(runners) or not err
         for r in runners:
             d = details.get(r["id"])
             r["details"] = d is not None
@@ -706,7 +1088,8 @@ class Project:
         for j in jobs:
             j["elsewhere"] = j["status"] == "running" and (j["runner"] or {}).get("id") not in own
             # Only when every runner's tags are known: don't cry wolf.
-            j["stuck"] = j["status"] == "pending" and loaded and not any(can_run(r, j) for r in runners)
+            j["stuck"] = (j["status"] == "pending" and loaded and self.forge.may_stick(j)
+                          and not any(can_run(r, j) for r in runners))
         return {"runners": runners, "jobs": jobs, "at": at, "error": err}
 
     # -- milestones --

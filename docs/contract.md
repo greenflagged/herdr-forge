@@ -31,8 +31,7 @@ and `npm test` fails when one is out of date. Machines that run forge.py must be
   follows the focused terminal.
 - `on`: the Herdr machine where `glab`/`gh` is logged in and `forge.py` runs. Omitted or
   null: this computer.
-- `provider`: `gitlab` (default) or `github` (not built yet: `forge.py` answers with an
-  error). Inferred from `host` when missing. `projectOf` gives `provider: null` for a host
+- `provider`: `gitlab` (default) or `github`. Inferred from `host` when missing. `projectOf` gives `provider: null` for a host
   we don't support (Bitbucket, Codeberg): say so on screen instead of calling forge.py.
 - `host`: defaults to `gitlab.com` / `github.com`. Self-hosted GitLab: set it.
 - `folder`: the project's checkout on `on`, where agent actions start. `forge-requests`
@@ -128,8 +127,9 @@ Request    {iid, title, url, draft, auto_merge, conflicts, source, target, sha, 
             labels[], created_ms, updated_ms, ci: {id, status, url, updated_ms} | null}
            fork: the source branch is in another project (a fork), so `source` names a
            branch that isn't in this repo
-Pipeline   {id, iid, ref, sha, status, source, updated_ms, url}      ref: "main" or "!811";
-           source: "request" (an MR/PR pipeline), else the forge's word (push, schedule, web...)
+Pipeline   {id, iid, ref, sha, status, source, updated_ms, url, name?} ref: "main" or "!811";
+           source: "request" (an MR/PR pipeline), else the forge's word (push, schedule, web...);
+           name: the workflow's name (GitHub only)
 Job        {id, name, group, status, duration, allow_failure, url}    group: stage / workflow
 Runner     {id, name, status, paused, url, details, running: [jobId],
             tags[], run_untagged, version, platform, arch, contacted_ms}   last six: when details
@@ -152,20 +152,36 @@ forge: `created`, `waiting_for_resource`, `preparing`, `pending`, `running`, `su
 Velocity buckets: bucket `i` covers `[start + i*size, start + (i+1)*size)`. `now` is the
 last 7 days, `avg` the average week over 12 weeks (for `duration` rows, medians in ms).
 
-### What the shapes will mean on GitHub
+### What the shapes mean on GitHub
 
-Not built yet; these are the decisions the shapes already allow, so mods must cope with
-the nulls now:
+`GitHub` in forge.py talks to `gh api` (REST, and GraphQL where REST would need more calls or
+mixes PRs into issues). Mods must cope with the nulls:
 
-- `Request.ci` is the PR head commit's combined check status (all workflows rolled up);
-  `id` null, `url` the checks page.
-- `Pipeline` is one workflow run; `ref` is the branch or `#<pr>`; `iid` the run number.
-  `Job.group` is the run's workflow name (the same for every job in a run).
-- `Runner` needs admin rights on GitHub: without them, `runners` answers an error and
-  the panel says so. `run_untagged` is always true, `tags` are runner labels.
-- `Milestone` counts come with the milestone. `Issue.weight` and `blocking` are null.
+- `repo` is `owner/name`; anything deeper is refused.
+- `Request.ci` is the PR head commit's rolled-up check status (`statusCheckRollup`); `id` null,
+  `url` the PR's checks page, `updated_ms` the PR's. It comes with `requests` in one call.
+- `merge` picks the first allowed method (merge, squash, rebase) and passes `sha`. Refused for
+  required status checks or a merge queue, it enables auto-merge instead (`text` says so).
+- `Pipeline` is one workflow run: `iid` the run number, `ref` the branch or `#<pr>` (a fork's PR
+  run has no PR attached, so its branch), `name` the workflow. `Job.group` is the workflow name,
+  `allow_failure` always false, `duration` null until the job completes. `retry` reruns the
+  failed jobs, or the whole run when there are none; `cancel` cancels the run.
+- `Runner`: self-hosted runners; listing them needs admin rights, and without them `runners`
+  answers that error (with `jobs` still filled). Details come with the list: `tags` are the
+  runner's labels lowercased, `run_untagged` always true, `version` and `contacted_ms` null,
+  `platform` the OS, `arch` from the labels. `CiJob.tags` are the job's `runs-on` labels; a
+  pending job is `stuck` only when it asks for `self-hosted`, and nothing is stuck while the
+  runner list failed.
+- `Milestone.id` is the milestone number (what `update`'s `milestone` takes); counts are issues
+  only (GraphQL), so they come with the milestone and are never null.
+- `Issue.weight` and `blocking` are null; `requests` counts the PRs that close the issue.
+  `show`'s requests are the closing PRs plus cross-referenced and connected ones, from this
+  repository only. `LinkedRequest.state` is `opened`, `merged` or `closed`.
+- Velocity comes from search (`is:pr is:merged merged:>=...`), which stops at 1000 results.
 - Scoped labels: GitHub has none; the separator is a setting (`query`'s `sep`), default
-  `": "` (`priority: high`).
+  `": "` (`priority: high`). Accepting a triage proposal adds the label, which GitHub creates
+  if it's missing.
+- Rate limits: the secondary limit pauses the host 2 minutes, the primary one 10.
 
 ### Issue queries
 

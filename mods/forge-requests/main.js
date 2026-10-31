@@ -9,7 +9,7 @@ import { CI, defaultActions, checkoutOf, liveAgents, itemOf } from "./requests.j
 
 // Open merge requests (GitLab) / pull requests (GitHub) for one project, through forge.py.
 // props: { repo, on?, provider?, host?, folder?, actions? } (docs/contract.md, docs/actions.md)
-// forge.py runs on `on` (where glab is logged in); links open in this computer's browser.
+// forge.py runs on `on` (where glab or gh is logged in); links open in this computer's browser.
 
 const MOD = "forge-requests";
 const POLL = 60; // seconds
