@@ -214,7 +214,7 @@ export default class CI extends View {
           .child(h_flex().pl(20).gap(8).text_size(11).text_color(t.muted)
             .child(div().text_color(this.color(t, p.status)).child((p.status ?? "").replace(/_/g, " ")))
             .when(p.iid != null, (e) => e.child(div().text_color(t.dim).child(`#${p.iid}`)))
-            .child(div().text_color(t.dim).child(p.source === "MR" ? terms.request : p.source ?? "")))
+            .child(div().text_color(t.dim).child(p.source === "request" ? terms.request : p.source ?? "")))
           .when(open, (e) => e.child(this.jobList(p, t)));
       }));
 

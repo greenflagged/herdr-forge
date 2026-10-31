@@ -42,6 +42,7 @@ Optional on any action:
   `{ "conflicts": true }`, `{ "draft": [false] }`: a list means any of).
 - `confirm`: a question to ask before running it ("Close as won't fix?").
 - `primary`: draw it as the main button.
+- `tone: "danger"`: draw it red, for actions that rewrite history or can't be undone.
 - `tooltip`: what hovering says.
 - `worktree: true` (requests, agent actions): start in a worktree with the request's
   branch checked out instead of `folder`.

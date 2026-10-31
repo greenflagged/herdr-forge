@@ -91,7 +91,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `milestones P <maxAge> <force>` | `{milestones: [Milestone], at, error}` |
 | `milestone-items P <title> <maxAge> <force>` | `{items: [MilestoneItem], at, error}` |
 | `velocity P <maxAge> <force> <12w\|30d> <nowMs> <tzOffsetMin>` | `{n, size, start, at, error, rows: [Row]}` with row keys `merged`, `closed`, `cycle` |
-| `commits <top> <ref> <12w\|30d> <nowMs> <tzOffsetMin> <force>` | `{n, size, start, at, error, row: Row, total}`: run on the repo's machine |
+| `commits <top> <ref> <12w\|30d> <nowMs> <tzOffsetMin> <force>` | `{n, size, start, at, error, row: Row, total}`: run on the repo's machine. No maxAge: it re-reads git every 5 min and fetches an `origin/*` ref every 15; an empty ref means HEAD |
 | `sync P <since> <force>` | `{now, last_sync, error, changed, more, triage_at, triage_run}` |
 | `meta P` | `{labels: [{name, color, description}], milestones: [{id, title, due}], sep}` |
 | `query P <json>` | `{rows, offset, matched, total, counts, scopes, sep}` (below) |
@@ -107,7 +107,8 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `skill <status\|install> <name> <text>` | `{installed, current, older, version, path}` |
 | `version` | `{version, shapes}` |
 
-Writes drop the cached answers they change: `merge` drops requests, CI and velocity;
+Writes (`merge`, `pipeline-act`, `update`, `comment`, triage ones) answer `{error}` instead
+when they fail; nothing is cached for them. Writes drop the cached answers they change: `merge` drops requests, CI and velocity;
 `pipeline-act` drops CI and runners' jobs; `update` drops milestones and velocity.
 
 ### Shapes
@@ -115,7 +116,8 @@ Writes drop the cached answers they change: `merge` drops requests, CI and veloc
 ```
 Request    {iid, title, url, draft, auto_merge, conflicts, source, target, sha, author,
             labels[], created_ms, updated_ms, ci: {id, status, url, updated_ms} | null}
-Pipeline   {id, iid, ref, sha, status, source, updated_ms, url}      ref: "main" or "!811"
+Pipeline   {id, iid, ref, sha, status, source, updated_ms, url}      ref: "main" or "!811";
+           source: "request" (an MR/PR pipeline), else the forge's word (push, schedule, web...)
 Job        {id, name, group, status, duration, allow_failure, url}    group: stage / workflow
 Runner     {id, name, status, paused, url, details, running: [jobId],
             tags[], run_untagged, version, platform, arch, contacted_ms}   last six: when details
@@ -175,7 +177,9 @@ the nulls now:
   It answers for any copy with those props (Herdr doesn't tell a block its own id), and
   fails safe (true) when it can't tell.
 - `requestItem(request, project)`, `issueItem(issue, project, sep)`: the fields actions see.
-- `ago(ms)`, `clock(seconds)`, `span(ms)`, `num(x, digits)`, `openUrl(exec, url)`.
+- `ago(ms)` ("now", "3m", "2h", "5d": write "3m ago" yourself, and "now" alone),
+  `clock(seconds)`, `span(ms)`, `num(x, digits)`, `openUrl(exec, url)`.
+- `checkoutOf(folder, spaces(), on, repo)`: where agents start when `props.folder` is missing.
 - Actions: `fill`, `matches`, `actionList`, `describe`, `runAction`, `WORKTREE`. See
   actions.md.
 

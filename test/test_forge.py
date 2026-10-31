@@ -160,7 +160,7 @@ class Forge(unittest.TestCase):
                                                          "updated_at": iso(NOW), "web_url": "u"}]}],
                      [r"-X POST .*pipelines/5/retry", {"out": {}}]])
         p = self.run_forge("pipelines", *P, 600, 0)["pipelines"][0]
-        self.assertEqual((p["ref"], p["source"]), ("!9", "MR"))
+        self.assertEqual((p["ref"], p["source"]), ("!9", "request"))
         self.run_forge("pipeline-act", *P, 5, "retry")
         n = len(self.calls())
         self.run_forge("pipelines", *P, 600, 0)

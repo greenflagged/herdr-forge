@@ -38,7 +38,7 @@ export function defaultActions(terms) {
 4. When everything is green, merge it with ${mergeCmd}, then tell me it's done.`,
     },
     {
-      id: "resolve", label: "Resolve", worktree: true, primary: true,
+      id: "resolve", label: "Resolve", worktree: true, primary: true, tone: "danger",
       when: { conflicts: true },
       tooltip: "Start an agent to rebase and resolve the conflicts",
       task: `${kind[0].toUpperCase()}${kind.slice(1)} {ref} in {repo} can't be merged because of conflicts with {target}: "{title}" ({url}), branch {source}. You're in its worktree.
@@ -53,13 +53,7 @@ export function defaultActions(terms) {
 
 // Where agent actions start: props.folder, else a space on `on` whose folder is named
 // after the repo (…/shop, or a worktree-style …-shop).
-export function checkoutOf(folder, spaces, on, repo) {
-  if (folder) return folder;
-  const name = (repo ?? "").split("/").pop();
-  if (!name) return null;
-  return spaces.find((s) => (s.machine ?? null) === (on ?? null) && typeof s.folder === "string"
-    && (s.folder.endsWith(`/${name}`) || s.folder.endsWith(`-${name}`)))?.folder ?? null;
-}
+export { checkoutOf } from "./lib.js";
 
 // The agents on one request, from shared("forge.requestAgents")[url], with their live
 // status: top-level agents by address, else live sub-agents among the terminals. Ones

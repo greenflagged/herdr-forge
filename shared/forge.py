@@ -280,7 +280,7 @@ class GitLab:
     def pipelines(self):
         return [{
             "id": p["id"], "iid": p.get("iid"), "ref": ref_label(p.get("ref")), "sha": p.get("sha"),
-            "status": p["status"], "source": "MR" if p.get("source") == "merge_request_event" else (p.get("source") or ""),
+            "status": p["status"], "source": "request" if p.get("source") == "merge_request_event" else (p.get("source") or ""),
             "updated_ms": ms(p.get("updated_at")), "url": p["web_url"],
         } for p in self.api(f"{self.project}/pipelines?per_page=20")]
 
@@ -624,6 +624,9 @@ class Project:
             r["details"] = d is not None
             loaded = loaded and r["details"]
             r.update(d or {})
+        # Online first, then by name; queued jobs oldest first.
+        runners.sort(key=lambda r: (r.get("status") != "online", (r.get("name") or "").lower()))
+        jobs.sort(key=lambda j: (j["status"] != "running", j.get("created_ms") or 0))
         own = {r["id"] for r in runners}
         for r in runners:
             r["running"] = [j["id"] for j in jobs if j["status"] == "running" and (j["runner"] or {}).get("id") == r["id"]]

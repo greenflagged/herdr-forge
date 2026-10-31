@@ -313,6 +313,16 @@ export function describe(a) {
   return a.label;
 }
 
+// Where agents start for a project: props.folder, else a space on `on` whose folder is
+// named after the repo (".../shop" or ".../acme-shop"), else null.
+export function checkoutOf(folder, spaces, on, repo) {
+  if (folder) return folder;
+  const name = (repo ?? "").split("/").pop();
+  if (!name) return null;
+  return spaces.find((s) => (s.machine ?? null) === (on ?? null) && typeof s.folder === "string"
+    && (s.folder.endsWith(`/${name}`) || s.folder.endsWith(`-${name}`)))?.folder ?? null;
+}
+
 // Fills a list of arguments, refusing a whole-argument placeholder that turns into an option.
 function fillArgs(list, ctx) {
   return asList(list).map((t) => {

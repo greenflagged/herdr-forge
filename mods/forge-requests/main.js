@@ -178,9 +178,10 @@ export default class ForgeRequests extends View {
         .child(this.loading ? "Loading…" : "↻")));
 
     // Small row button; stops the click so the row doesn't also open the request.
-    const button = (id, label, primary, onClick) =>
-      div().id(id).flex_none().px(6).py(1).rounded(4).bg(primary ? t.solid : t.raised).text_size(11)
-        .text_color(primary ? t.solid_foreground : t.foreground).cursor_pointer()
+    // tone "danger": red, as Resolve; primary: the solid button color.
+    const button = (id, label, primary, onClick, danger = false) =>
+      div().id(id).flex_none().px(6).py(1).rounded(4).bg(danger ? t.ansi1 : primary ? t.solid : t.raised).text_size(11)
+        .text_color(danger ? t.background : primary ? t.solid_foreground : t.foreground).cursor_pointer()
         .hover((s) => s.opacity(0.85))
         .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
         .child(label);
@@ -254,7 +255,7 @@ export default class ForgeRequests extends View {
               .children(shown.map((a) => button(`act-${r.iid}-${a.id}`, a.label, Boolean(a.primary), (cx) => {
                 if (a.confirm) this.confirming = { iid: r.iid, id: a.id }; else { this.act(a, r, cx); return; }
                 cx.notify();
-              }).tooltip(describe(a))))
+              }, a.tone === "danger").tooltip(describe(a))))
               .when(mergeable, (e) => e.child(button(`merge-${r.iid}`, "Merge", true, (cx) => {
                 this.confirming = { iid: r.iid, id: "merge" };
                 cx.notify();
