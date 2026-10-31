@@ -681,7 +681,13 @@ class GitHub(Cli):
     def runners(self):
         """Self-hosted runners only: GitHub's own aren't the project's. Needs admin rights."""
         out = []
-        for r in self.api(f"{self.repo}/actions/runners?per_page=100")["runners"]:
+        try:
+            listed = self.api(f"{self.repo}/actions/runners?per_page=100")["runners"]
+        except RuntimeError as e:
+            if "HTTP 403" in str(e):
+                raise RuntimeError("Only the repository's admins can list its runners on GitHub.") from e
+            raise
+        for r in listed:
             self._labels[r["id"]] = self.runner_info(r)
             out.append({"id": r["id"], "name": r.get("name") or f"#{r['id']}", "status": r.get("status"),
                         "paused": False, "url": f"{self.url}/settings/actions/runners/{r['id']}"})

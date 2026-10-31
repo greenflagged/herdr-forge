@@ -6,7 +6,7 @@ import {
 import {
   exec, props, theme, run, spaces, knownAgents, shared, setShared, appHome, window, readTextFile, openOverlay, notify,
 } from "herdr";
-import { forgeClient, projectOf, issueItem, actionList, matches, runAction, describe, ago, openUrl } from "./lib.js";
+import { forgeClient, projectOf, issueItem, actionList, matches, runAction, describe, actionLabel, ago, openUrl } from "./lib.js";
 import { Chrome, button, chip, note, staleError, dropdown } from "./ui.js";
 import {
   STATES, DEFAULT_SEP, sorts, nextSort, splitLabels, scopedChange, labelToggle, scopeValues, metaScopes,
@@ -808,7 +808,7 @@ export default class Issues extends View {
         .when((i.assignees ?? []).length > 0, (e) => e.child(div().child(`→ ${i.assignees.join(", ")}`)))
         .when(busy, (e) => e.child(div().text_color(t.accent).child(`Saving to ${terms.name}…`))))
       .child(h_flex().gap(6).pt(6).flex_wrap()
-        .children(actions.map((a) => btn(`act-${a.id}`, a.label, (cx) => this.act(i, a, cx),
+        .children(actions.map((a) => btn(`act-${a.id}`, actionLabel(a), (cx) => this.act(i, a, cx),
           { tone: a.tone ?? (a.primary ? "primary" : null), tooltip: describe(a) })))
         .child(btn("state", i.state === "opened" ? "Close issue" : "Reopen", (cx) => this.setState(i, cx))))
       .when(Boolean(confirming), (e) => e.child(h_flex().gap(6).items_center().p(8).rounded(6).border_1().border_color(t.accent).text_size(11.5)
@@ -901,7 +901,8 @@ export default class Issues extends View {
     return frame(div().flex_1().min_h(0)
       .child(h_resizable("forge-issues").size_full()
         .child(resizable_panel().size(210).size_range(150, 320).child(this.sidebar(t, tc)))
-        .child(resizable_panel().child(this.list(t, tc)))
-        .child(resizable_panel().size(480).size_range(320, 900).child(div().size_full().border_l(1).border_color(t.border).child(this.detailPane(t, tc))))));
+        // The list needs room for a title; in the Forge layout the whole browser is ~880px wide.
+        .child(resizable_panel().size_range(260).child(this.list(t, tc)))
+        .child(resizable_panel().size(400).size_range(300, 900).child(div().size_full().border_l(1).border_color(t.border).child(this.detailPane(t, tc))))));
   }
 }

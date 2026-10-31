@@ -92,7 +92,7 @@ export default class Forge extends View {
           let project = where ? await resolve(where, config).catch(() => null) : null;
           if (!project || project.none) project = state().project ?? null;
           if (project) await show(project, config);
-          else toast("Focus a terminal in a GitLab repo, then press ctrl-shift-f again.");
+          else toast("Focus a terminal in a GitLab or GitHub repo, then press ctrl-shift-f again.");
         }
       } catch (e) {
         toast(msg(e), "error");
@@ -120,7 +120,7 @@ export default class Forge extends View {
       try {
         const where = spaceFolder(sp);
         const project = where ? await resolve(where, this.config) : null;
-        if (!project || project.none) toast(`${sp.name} isn't in a ${project?.host ? `${project.host} repo Forge supports` : "git repo with a GitLab remote"}.`);
+        if (!project || project.none) toast(`${sp.name} isn't in a ${project?.host ? `${project.host} repo Forge supports` : "git repo with a GitLab or GitHub remote"}.`);
         else await show(project, this.config);
       } catch (e) {
         toast(msg(e), "error");

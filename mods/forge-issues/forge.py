@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+418f8d276d86"
+VERSION = "0.1.0+294743f85c9c"
 
 import json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -681,7 +681,13 @@ class GitHub(Cli):
     def runners(self):
         """Self-hosted runners only: GitHub's own aren't the project's. Needs admin rights."""
         out = []
-        for r in self.api(f"{self.repo}/actions/runners?per_page=100")["runners"]:
+        try:
+            listed = self.api(f"{self.repo}/actions/runners?per_page=100")["runners"]
+        except RuntimeError as e:
+            if "HTTP 403" in str(e):
+                raise RuntimeError("Only the repository's admins can list its runners on GitHub.") from e
+            raise
+        for r in listed:
             self._labels[r["id"]] = self.runner_info(r)
             out.append({"id": r["id"], "name": r.get("name") or f"#{r['id']}", "status": r.get("status"),
                         "paused": False, "url": f"{self.url}/settings/actions/runners/{r['id']}"})

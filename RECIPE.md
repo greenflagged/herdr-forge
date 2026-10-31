@@ -75,9 +75,13 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
   15 min (GitLab), issues 60 s focused / 5 min away. The first read after starting shows the cache at
   once.
 - Merge asks "Merge into main?" and merges only the commit shown.
-- Ship (MRs open a day or more) and Resolve (conflicted MRs) ask first. Then they start Claude Code
-  in a worktree of the branch. The task treats MR text as untrusted. For Ship, the task also waits
-  for a go-ahead before merging. Neither shows on fork MRs.
+- ✦ marks every button that starts an agent (a `task` or `agent` action); the rest act at once. Every
+  button has a tooltip saying what it does; Merge's says it uses no agent and when it turns on
+  auto-merge instead.
+- ✦ Get merged (id `ship`, MRs open a day or more) and ✦ Fix conflicts (id `resolve`, conflicted MRs,
+  red) ask first. Then they start Claude Code in a worktree of the branch. The task treats MR text as
+  untrusted. Get merged waits for a go-ahead before merging; Fix conflicts force-pushes and never
+  merges. Neither shows on fork MRs.
 - Issue edits are written to GitLab first, shown at once, and rolled back if GitLab refuses. One write
   runs at a time.
 - Keys: ↑/↓ or j/k move the selection, `/` searches, Esc clears, Enter opens in the browser.
@@ -124,7 +128,7 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
 
 ## Done when
 
-- ctrl-shift-f in a GitLab repo's terminal switches to Forge for that project; pressing it again (or
+- ctrl-shift-f in a GitLab or GitHub repo's terminal switches to Forge for that project; pressing it again (or
   Back) returns to the previous layout. Other project opens another space's repo.
 - Each panel shows its data, and after a restart shows it at once from the cache.
 - Clicking a header collapses it; clicking again restores its size.

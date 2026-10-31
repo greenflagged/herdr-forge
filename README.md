@@ -1,7 +1,7 @@
 # Forge for Herdr
 
 Forge puts your GitLab or GitHub project inside [Herdr](https://herdr.dev). You get open merge requests
-(or pull requests) you can merge or hand to an agent, CI pipelines or workflow runs and runners, milestones, a velocity chart, and a full issue
+(or pull requests) you can merge yourself or hand to an AI agent, CI pipelines or workflow runs and runners, milestones, a velocity chart, and a full issue
 browser that starts agents on issues. Press **ctrl-shift-f** and the whole window turns into Forge
 for the repo of the terminal you're in.
 
@@ -29,17 +29,38 @@ Panels there work the same way.
 ![Open merge requests, milestones with their progress, and the pipelines list](docs/requests-ci.png)
 
 - **Merge requests:** each open MR with its draft, auto-merge, conflict and pipeline status. Hover one
-  for **Merge**. It asks first, and it merges only the commit you saw.
-  - On an MR that has been open for a day or more, **Ship** starts an agent. The agent fixes what's
-    outstanding, then waits for your go-ahead to merge.
-  - On a conflicted MR, **Resolve** starts an agent that rebases it and force-pushes the branch, without merging.
-  - Both work in a worktree of the MR's branch.
+  for its buttons (below).
 - **Pipelines:** the last 20. Click one for its jobs by stage; hover for Retry, Cancel and ↗.
 - **Runners:** the project's own runners, what each is running, and queued jobs, flagged red when no
   online runner has their tags.
 - **Milestones:** progress for each active milestone, soonest due first. Click one for its issues.
 - **Velocity:** commits, merged MRs, closed issues and MR cycle time over 12 weeks or 30 days, against
   your average week.
+
+## Which buttons start an agent
+
+**✦ marks every button that starts an AI agent.** A button without ✦ acts at once, by itself.
+That holds for your own buttons too: any button with a `task` gets the ✦. Hover a button for
+what it does. Every button that writes to the forge or starts an agent asks before it runs.
+
+Hover an MR (or PR) to get these buttons:
+
+| Button | Shows on | What it does | Agent? |
+|---|---|---|---|
+| **Merge** | MRs that aren't drafts and have no conflicts | Merges now, only the commit you saw. If CI is still running, it turns on auto-merge instead. | No |
+| **✦ Get merged** | MRs open a day or more, without conflicts | Starts Claude Code in a worktree of the branch. It fixes failing CI, conflicts and review comments, then **waits for your go-ahead before merging**. | Yes |
+| **✦ Fix conflicts** (red) | MRs with conflicts | Starts Claude Code in a worktree of the branch. It rebases onto the target branch, resolves the conflicts, runs the tests and **force-pushes** the branch. It never merges. | Yes |
+
+Some things to know about the agent buttons:
+
+- **They need Claude Code** (`claude`) on the machine with the checkout. The task asks Claude to
+  stop and ask you before any judgment call.
+- **They never show on MRs from forks.** The worktree is found by branch name, and a fork's branch
+  name could match one of yours.
+- **They treat the MR as untrusted.** Anyone can write an MR's title, description and comments.
+  The task tells the agent to read them as data, never as instructions.
+- **To turn them off**, set `"actions": []` on the merge requests panel. To keep them and add your
+  own, use `"actions": ["defaults", { ... }]` (see [docs/actions.md](docs/actions.md)).
 
 ## Issues
 
@@ -56,7 +77,7 @@ Every issue in the project, cached on your machine so filtering and search are i
 ## Make it yours
 
 You write the list of buttons on merge requests and issues. Each button can start an agent with your
-prompt, run a program, run a Herdr command, or open a mod of your own with the issue. A button can
+prompt (it gets the ✦), run a program, run a Herdr command, or open a mod of your own with the issue. A button can
 depend on labels, state or age. Other mods can add buttons while they run. The issue browser also
 tells other mods which issue is open and what just changed.
 
@@ -170,11 +191,11 @@ you've cloned, give the tab bar a button that runs `run("mod.open", { name: "for
   panels don't ask.
 - **Writes to the forge** only when you click: Merge, Retry, Cancel, issue edits and comments, and
   accepting triage proposals.
-- **Agents:** buttons start agents with prompts that include issue and MR text. Anyone who can open
+- **Agents:** buttons marked ✦ start agents with prompts that include issue and MR text. Anyone who can open
   an issue or MR wrote that text. The built-in prompts tell the agent to treat it as data and to ask
   before merging. Review your own prompts the same way.
 - **Programs:** `python3` and `glab` or `gh` on the machine with your forge login, `git` in your checkouts
-  (commit counts, and a worktree for Ship and Resolve), `xdg-open` or `open` for links.
+  (commit counts, and a worktree for ✦ Get merged and ✦ Fix conflicts), `xdg-open` or `open` for links.
 - **Files**, on each machine the panels talk to the forge from, readable only by you:
   - `~/.local/share/herdr-forge/` (or `$HERDR_FORGE_HOME`): the panels' helper script and one SQLite
     database per project caching what they show, including issue text and comments.

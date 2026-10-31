@@ -21,13 +21,22 @@ script, fire a Herdr command, or open a mod of your own with the item.
 `props.actions` replaces the defaults. To keep them and add yours, put `"defaults"` in
 the list: `["defaults", { ... }]`. `forge-issues` has no defaults. `forge-requests` has two:
 
-- **Ship** shows on a request open for a day or more. An agent fixes what's outstanding, then
-  waits for your go-ahead before merging.
-- **Resolve** shows on a conflicted request. An agent rebases it and force-pushes the branch,
-  without merging.
+- **✦ Get merged** (id `ship`) shows on a request open for a day or more. Claude Code fixes
+  what's outstanding (failing CI, conflicts, review comments), then waits for your go-ahead
+  before merging.
+- **✦ Fix conflicts** (id `resolve`, red) shows on a conflicted request. Claude Code rebases it
+  onto the target branch and force-pushes the branch. It never merges.
 
 Both ask before starting, work in a worktree of the request's branch, and don't show on requests
-from forks.
+from forks. Set `"actions": []` to turn them off.
+
+**Merge** isn't an action: it's built in, uses no agent, and merges the commit you saw at once
+(or turns on auto-merge while CI runs).
+
+**✦ marks agent buttons.** Every action with a `task` or an `agent` shows ✦ before its label, so
+people can tell the buttons that start an agent from the ones that act at once. Don't put ✦ in
+your own labels; it's added for you. Give agent actions a `tooltip` that says what the agent will
+do and whether it pushes or merges.
 
 ## What an action can do
 
@@ -51,7 +60,7 @@ Optional on any action:
 - `confirm`: a question to ask before running it ("Close as won't fix?").
 - `primary`: draw it as the main button.
 - `tone: "danger"`: draw it red, for actions that rewrite history or can't be undone.
-- `tooltip`: what hovering says.
+- `tooltip`: what hovering says. Without one, agent actions say "Starts claude in a new tab" (or your `agent`), and others name what they run.
 - `worktree: true` (requests, agent actions): start in a worktree with the request's
   branch checked out instead of `folder`.
 

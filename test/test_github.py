@@ -187,7 +187,7 @@ class GitHub(unittest.TestCase):
                      [r"runs\?status=waiting", {"out": {"workflow_runs": []}}],
                      [r"runs/1/jobs", {"out": {"jobs": [job(2, status="queued", conclusion=None, labels=["self-hosted"])]}}]])
         out = self.run_forge("runners", *P, 60, 0)
-        self.assertIn("403", out["error"])
+        self.assertIn("admins", out["error"])
         self.assertFalse(out["jobs"][0]["stuck"])
 
     def test_org_runners_we_cant_list_dont_make_jobs_stuck(self):
