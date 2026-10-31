@@ -134,7 +134,6 @@ export default class Forge extends View {
     const t = theme();
     if (!this.bar) return div();
     const s = state(), p = s.project;
-    const stop = (_e, cx) => cx.stop_propagation();
     const prev = s.previous && s.previous !== LAYOUT ? s.previous : "main";
 
     const list = v_flex().id("forge-spaces").min_w(240).max_h(360).overflow_y_scrollbar().p(4).gap(1).rounded(6)
@@ -149,7 +148,6 @@ export default class Forge extends View {
       .on_open_change((o, cx) => { this.picker = o; cx.notify(); })
       .trigger(h_flex().id("forge-switch-trigger").gap(6).items_center().px(8).py(2).rounded(5).cursor_pointer()
         .border_1().border_color(this.picker ? t.accent : t.border).hover((st) => st.bg(t.hover))
-        .on_mouse_down("left", stop)
         .child(div().text_size(11.5).text_color(t.muted).child("Other project"))
         .child(div().text_size(9).text_color(t.dim).child("▾")))
       .content(list);
