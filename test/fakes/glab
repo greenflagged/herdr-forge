@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+# A stand-in for glab: answers from $FAKE_GLAB/routes.json and logs each call.
+# routes: [[regex over the joined argv, {"out": json} | {"err": text}]]; first match wins.
+import json, os, re, sys
+d = os.environ["FAKE_GLAB"]
+argv = " ".join(sys.argv[1:])
+with open(os.path.join(d, "calls.log"), "a") as f:
+    f.write(argv + "\n")
+for pattern, answer in json.load(open(os.path.join(d, "routes.json"))):
+    if re.search(pattern, argv):
+        if "err" in answer:
+            sys.stderr.write(answer["err"] + "\n")
+            sys.exit(1)
+        out = answer["out"]
+        print(out if isinstance(out, str) else json.dumps(out))
+        sys.exit(0)
+sys.stderr.write(f"no route for: {argv}\n")
+sys.exit(1)

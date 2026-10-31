@@ -1,0 +1,6 @@
+# Herdr writes these into every mod folder
+mods/*/gpui-kit.d.ts
+mods/*/jsconfig.json
+mods/*/*.error
+__pycache__/
+node_modules/

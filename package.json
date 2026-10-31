@@ -1,0 +1,9 @@
+{
+  "name": "herdr-forge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync": "node scripts/sync.mjs",
+    "test": "node scripts/sync.mjs --check && node --test && python3 -m unittest discover -s test -p 'test_*.py'"
+  }
+}
