@@ -3,7 +3,12 @@ import { test } from "node:test";
 import { actionLabel, actionList, describe, fill, matches, projectOf, requestItem } from "../shared/lib.js";
 import {
   CI, checkoutOf, defaultActions, itemOf, liveAgents, mergeTip, agentPlaces, parseGitLook, ownersOf, askTarget, askText, machineOf,
+  shownMerged, deployState, checkDue, cleanupPlan, cleanupLines, notDoneWhy, CLEAN_WORKTREE, GIT_LOOK, RECENT,
 } from "../mods/forge-requests/requests.js";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, existsSync, rmSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const now = 1000 * 3600000;
 const request = (over = {}) => ({
@@ -173,6 +178,160 @@ test("askText names the request in the forge's words and never merges conflicts"
   assert.match(askText("merge", request(), gl), /^Get !7 ready and merge it once CI passes\./);
   assert.match(askText("merge", request({ iid: 12 }), gh), /^Get #12 ready/);
   assert.match(askText("conflicts", request(), gl), /^!7 has conflicts with main\..*Don't merge\.$/);
-  assert.deepEqual(parseGitLook("feat\ngit@x:a/b.git\n"), { branch: "feat", remote: "git@x:a/b.git" });
-  assert.deepEqual(parseGitLook("\n\n"), { branch: null, remote: null });
+  assert.deepEqual(parseGitLook("feat\ngit@x:a/b.git\nabc\n/w/x\n1\n"),
+    { branch: "feat", remote: "git@x:a/b.git", head: "abc", top: "/w/x", linked: true });
+  assert.deepEqual(parseGitLook("\n\n"), { branch: null, remote: null, head: null, top: null, linked: false });
+});
+
+// ---- after a merge ----
+
+const merged = (over = {}) => ({
+  iid: 7, title: "Fix login", url: "u7", source: "fix-login", target: "main", fork: false,
+  head_sha: "h7", merge_sha: "m7", merged_ms: now - 3600000, ci: { id: 3, status: "success", url: "c3" }, ...over,
+});
+
+test("shownMerged keeps the last day's merges, and older ones an agent is still on", () => {
+  const owned = new Set([9]);
+  const owners = (m) => (owned.has(m.iid) ? [{}] : []);
+  const list = [merged(), merged({ iid: 8, merged_ms: now - RECENT - 1 }), merged({ iid: 9, merged_ms: now - 3 * RECENT })];
+  assert.deepEqual(shownMerged(list, owners, now).map((m) => m.iid), [7, 9]);
+  assert.deepEqual(shownMerged([merged({ iid: 9, fork: true, merged_ms: now - 3 * RECENT })], owners, now), []);
+});
+
+test("deployState: CI first, then the project's deploy check", () => {
+  const flux = { label: "Flux", check: "true" };
+  assert.deepEqual(deployState(merged(), null, new Map(), now), { ci: "success", deploy: null, done: true });
+  assert.equal(deployState(merged({ ci: { status: "running" } }), null, new Map(), now).done, false);
+  assert.equal(deployState(merged({ ci: null, merged_ms: now - 60000 }), null, new Map(), now).ci, "pending", "a pipeline may still appear");
+  assert.deepEqual(deployState(merged({ ci: null }), null, new Map(), now), { ci: "none", deploy: null, done: true });
+  assert.equal(deployState(merged({ ci: { status: "running" } }), flux, new Map(), now).deploy, "waiting");
+  assert.equal(deployState(merged({ ci: { status: "failed" } }), flux, new Map(), now).deploy, "blocked");
+  assert.equal(deployState(merged(), flux, new Map(), now).deploy, "checking");
+  const no = new Map([["m7", { state: "no", text: "image 3380", at: now }]]);
+  assert.deepEqual(deployState(merged(), flux, no, now), { ci: "success", deploy: "no", done: false, text: "image 3380" });
+  const yes = new Map([["m7", { state: "yes", text: null, at: now }]]);
+  assert.equal(deployState(merged(), flux, yes, now).done, true);
+});
+
+test("checkDue runs the check once CI is through, again while it says no, never after yes", () => {
+  const flux = { check: "true" };
+  assert.equal(checkDue(merged(), null, new Map(), now, 60000), false, "no check set");
+  assert.equal(checkDue(merged({ ci: { status: "running" } }), flux, new Map(), now, 60000), false);
+  assert.equal(checkDue(merged(), flux, new Map(), now, 60000), true);
+  assert.equal(checkDue(merged(), flux, new Map([["m7", { state: "no", at: now - 1000 }]]), now, 60000), false);
+  assert.equal(checkDue(merged(), flux, new Map([["m7", { state: "no", at: now - 60000 }]]), now, 60000), true);
+  assert.equal(checkDue(merged(), flux, new Map([["m7", { state: "yes", at: 0 }]]), now, 60000), false);
+});
+
+test("notDoneWhy says what a cleanup would skip waiting for", () => {
+  const terms = projectOf({ repo: "acme/shop" }).terms, flux = { label: "Flux", check: "x" };
+  const why = (m, d, c = new Map()) => notDoneWhy(deployState(m, d, c, now), d, terms);
+  assert.equal(why(merged(), null), null);
+  assert.equal(why(merged({ ci: { status: "failed" } }), flux), "pipeline failed on the merge commit");
+  assert.equal(why(merged({ ci: { status: "running" } }), null), "pipeline still running on the merge commit");
+  assert.equal(why(merged(), flux, new Map([["m7", { state: "error", text: "isn't on main", at: now }]])), "Flux check failed: isn't on main");
+  assert.equal(why(merged(), flux, new Map([["m7", { state: "no", text: "Flux runs abc", at: now }]])), "Flux hasn't confirmed it yet (Flux runs abc)");
+  assert.deepEqual(cleanupLines({ tabs: [], kills: [{ name: "w" }], worktrees: [], kept: [] }, "x"), ["Not deployed: x", "End w"]);
+});
+
+// One worker in its own worktree tab, a PM elsewhere with a sub-agent in another worktree.
+const after = {
+  agents: [
+    { address: "t1", pane: "p1", tab: "tab1", status: "idle", tab_name: "fix-login" },
+    { address: "t2", pane: "p3", tab: "tab2", status: "idle", tab_name: "pm" },
+  ],
+  panes: [
+    { pane: "p1", tab: "tab1", terminal: "t1", cwd: "/wt/fix-login", branch: "fix-login" },
+    { pane: "p2", tab: "tab1", terminal: "t9", cwd: "/wt/fix-login/src", branch: "fix-login" },
+    { pane: "p3", tab: "tab2", terminal: "t2", cwd: "/repo", branch: "main" },
+  ],
+  terminals: [{ address: "t5", parent: "t2", state: "live", status: "done", cwd: "/wt/add-csv", name: "worker" }],
+};
+const lookOf = (m) => (pl) => new Map([...pl.values()].map((p) => [p.key, m[p.cwd]]).filter(([, g]) => g));
+const remote = "git@gitlab.com:acme/shop.git";
+
+test("cleanupPlan closes a worktree's own tab, removes the worktree, and keeps what isn't safe", () => {
+  const pl = agentPlaces(after.agents, after.panes, after.terminals);
+  const g = lookOf({
+    "/wt/fix-login": { branch: "fix-login", remote, head: "h7", top: "/wt/fix-login", linked: true },
+    "/wt/add-csv": { branch: "add-csv", remote, head: "x", top: "/wt/add-csv", linked: true },
+    "/repo": { branch: "main", remote, head: "y", top: "/repo", linked: false },
+  })(pl);
+  const project = projectOf({ repo: "acme/shop" });
+  const m = merged();
+  const plan = cleanupPlan(m, ownersOf(m, pl, g, project), pl, after.panes, after.terminals, g);
+  assert.equal(plan.blocked, null);
+  assert.deepEqual(plan.tabs, [{ id: "tab1", name: "fix-login" }], "every pane in the tab is in the worktree");
+  assert.deepEqual(plan.kills, []);
+  assert.deepEqual(plan.worktrees, [{ machine: null, top: "/wt/fix-login", branch: "fix-login" }]);
+  assert.deepEqual(cleanupLines(plan), ["Close tab fix-login and its agent", "Remove worktree /wt/fix-login and branch fix-login"]);
+
+  // A sub-agent: end just it (its PM lives on), and its worktree has more commits than merged.
+  const m2 = merged({ iid: 8, source: "add-csv", head_sha: "h8" });
+  const plan2 = cleanupPlan(m2, ownersOf(m2, pl, g, project), pl, after.panes, after.terminals, g);
+  assert.deepEqual(plan2.kills, [{ address: "t5", name: "worker" }]);
+  assert.deepEqual(plan2.tabs, []);
+  assert.deepEqual(plan2.kept, [{ top: "/wt/add-csv", why: "it has commits that weren't merged" }]);
+  assert.deepEqual(cleanupLines(plan2), ["End worker", "Keep /wt/add-csv: it has commits that weren't merged"]);
+});
+
+test("cleanupPlan waits while an owner or one of its sub-agents is busy", () => {
+  const agents = [{ ...after.agents[0], status: "working" }, after.agents[1]];
+  const pl = agentPlaces(agents, after.panes, after.terminals);
+  const g = lookOf({ "/wt/fix-login": { branch: "fix-login", remote, head: "h7", top: "/wt/fix-login", linked: true } })(pl);
+  const project = projectOf({ repo: "acme/shop" });
+  const m = merged();
+  assert.equal(cleanupPlan(m, ownersOf(m, pl, g, project), pl, after.panes, after.terminals, g).blocked, "fix-login is still working");
+  // The owner rests, but a sub-agent it started is at a prompt.
+  const pl2 = agentPlaces(after.agents, after.panes, [{ address: "t7", parent: "t1", state: "live", status: "error", cwd: "/tmp" }]);
+  const g2 = lookOf({ "/wt/fix-login": { branch: "fix-login", remote, head: "h7", top: "/wt/fix-login", linked: true } })(pl2);
+  const plan = cleanupPlan(m, ownersOf(m, pl2, g2, project), pl2, after.panes, [{ address: "t7", parent: "t1", state: "live", status: "error" }], g2);
+  assert.match(plan.blocked, /waiting for you/);
+  // A tab with another folder in it isn't closed: only the agent ends.
+  const panes = [...after.panes, { pane: "p9", tab: "tab1", terminal: "t8", cwd: "/elsewhere" }];
+  const plan3 = cleanupPlan(m, ownersOf(m, pl, g, project).map((o) => ({ ...o, status: "idle" })), agentPlaces(after.agents, panes, []), panes, [], g);
+  assert.deepEqual(plan3.tabs, []);
+  assert.deepEqual(plan3.kills.map((k) => k.address), ["t1"]);
+});
+
+// The scripts, run for real against a throwaway repo.
+const hasGit = spawnSync("git", ["--version"]).status === 0;
+test("GIT_LOOK and CLEAN_WORKTREE against a real worktree", { skip: !hasGit }, () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "forge-wt-")));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const git = (cwd, ...a) => execFileSync("git", a, { cwd, env, encoding: "utf8" }).trim();
+  const sh = (script, cwd, ...a) => spawnSync("sh", ["-c", script, "sh", ...a], { cwd, env, encoding: "utf8" });
+  try {
+    const repo = join(dir, "repo"), wt = join(dir, "wt");
+    git(dir, "init", "-q", "-b", "main", repo);
+    git(repo, "commit", "-q", "--allow-empty", "-m", "one");
+    git(repo, "remote", "add", "origin", remote);
+    git(repo, "worktree", "add", "-q", "-b", "fix-login", wt);
+    const head = git(wt, "rev-parse", "HEAD");
+
+    assert.deepEqual(parseGitLook(sh(GIT_LOOK, join(wt)).stdout),
+      { branch: "fix-login", remote, head, top: wt, linked: true });
+    assert.equal(parseGitLook(sh(GIT_LOOK, repo).stdout).linked, false, "the main checkout");
+
+    // Refuses: a commit that wasn't merged, then an untracked file.
+    git(wt, "commit", "-q", "--allow-empty", "-m", "more");
+    let r = sh(CLEAN_WORKTREE, dir, wt, "fix-login", head);
+    assert.equal(r.status, 3);
+    assert.match(r.stdout, /commits that weren't merged/);
+    git(wt, "reset", "-q", "--hard", head);
+    writeFileSync(join(wt, "notes.txt"), "keep me");
+    r = sh(CLEAN_WORKTREE, dir, wt, "fix-login", head);
+    assert.equal(r.status, 4, r.stdout);
+    assert.ok(existsSync(join(wt, "notes.txt")), "nothing removed");
+    assert.match(sh(CLEAN_WORKTREE, dir, repo, "main", "").stdout, /isn't a linked worktree/);
+
+    rmSync(join(wt, "notes.txt"));
+    r = sh(CLEAN_WORKTREE, dir, wt, "fix-login", head);
+    assert.equal(r.status, 0, r.stdout);
+    assert.ok(!existsSync(wt));
+    assert.equal(git(repo, "branch", "--list", "fix-login"), "", "branch deleted");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

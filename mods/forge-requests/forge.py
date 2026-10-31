@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+3b88cd9f3417"
+VERSION = "0.1.0+70006e9f135a"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -49,6 +49,7 @@ META_EVERY = 3600               # labels and milestones for the issue browser
 RECONCILE_EVERY = 3600          # look for deleted issues
 RUNNER_DETAILS_EVERY = 600
 CACHE_DAYS = 7                  # cached answers nobody asked for in a week are deleted
+MERGED_DAYS = 7                 # how far back `merged` looks
 PRIORITIES = ["blocker", "critical", "high", "medium", "low"]
 START = time.time()
 
@@ -356,6 +357,37 @@ class GitLab(Cli):
         lines = [l for l in self.run(argv).splitlines() if l.strip()]
         return lines[-1] if lines else "Merged"
 
+    def merged(self, since):
+        """Merged since `since` (epoch s), newest first, each with its merge commit's newest
+        pipeline on the target branch. A fast-forward merge has no merge commit: the head is it."""
+        after = urllib.parse.quote(utc_iso(since), safe="")
+        out = []
+        for m in self.api(f"{self.project}/merge_requests?state=merged&updated_after={after}"
+                          "&order_by=updated_at&per_page=50"):
+            merged_ms = ms(m.get("merged_at"))
+            if not merged_ms or merged_ms < since * 1000:
+                continue
+            out.append({
+                "iid": m["iid"], "title": m["title"], "url": m["web_url"],
+                "author": (m.get("author") or {}).get("username"),
+                "source": m.get("source_branch"), "target": m.get("target_branch"),
+                "fork": m.get("source_project_id") != m.get("target_project_id"),
+                "head_sha": m.get("sha"),
+                "merge_sha": m.get("merge_commit_sha") or m.get("squash_commit_sha") or m.get("sha"),
+                "merged_ms": merged_ms, "ci": None,
+            })
+        ci = {}
+        for target in sorted({r["target"] for r in out if r["target"]}):
+            ref = urllib.parse.quote(target, safe="")
+            seen = ci.setdefault(target, {})
+            for p in self.api(f"{self.project}/pipelines?ref={ref}&per_page=50"):
+                seen.setdefault(p["sha"], {"id": p["id"], "status": p["status"], "url": p["web_url"],
+                                           "updated_ms": ms(p["updated_at"])})
+        for r in out:
+            r["ci"] = ci.get(r["target"], {}).get(r["merge_sha"])
+        out.sort(key=lambda r: -r["merged_ms"])
+        return out
+
     # -- CI --
 
     def pipelines(self):
@@ -560,6 +592,11 @@ def gh_day(iso):
     return (t + timedelta(hours=12)).strftime("%Y-%m-%d")
 
 
+def utc_iso(t):
+    """Epoch seconds as an ISO time in UTC."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
 def gh_since(iso):
     """Any ISO time as the UTC form GitHub's search takes."""
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -655,6 +692,31 @@ class GitHub(Cli):
                 raise e
             return "Set to merge when checks pass"
         return (out or {}).get("message") or "Merged"
+
+    MERGED_Q = """query($o:String!,$n:String!){repository(owner:$o,name:$n){pullRequests(states:MERGED,first:50,
+      orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number title url headRefName baseRefName headRefOid
+      isCrossRepository mergedAt author{login} mergeCommit{oid statusCheckRollup{state}}}}}}"""
+
+    def merged(self, since):
+        out = []
+        for m in self.repository(self.MERGED_Q)["pullRequests"]["nodes"]:
+            merged_ms = ms(m.get("mergedAt"))
+            if not merged_ms or merged_ms < since * 1000:
+                continue
+            commit = m.get("mergeCommit") or {}
+            rollup = commit.get("statusCheckRollup")
+            oid = commit.get("oid") or m.get("headRefOid")
+            out.append({
+                "iid": m["number"], "title": m["title"], "url": m["url"],
+                "author": (m.get("author") or {}).get("login"),
+                "source": m.get("headRefName"), "target": m.get("baseRefName"),
+                "fork": bool(m.get("isCrossRepository")),
+                "head_sha": m.get("headRefOid"), "merge_sha": oid, "merged_ms": merged_ms,
+                "ci": {"id": None, "status": GH_ROLLUP.get(rollup["state"], "pending"),
+                       "url": f"{self.url}/commit/{oid}", "updated_ms": merged_ms} if rollup else None,
+            })
+        out.sort(key=lambda r: -r["merged_ms"])
+        return out
 
     # -- CI: workflow runs --
 
@@ -1062,9 +1124,14 @@ class Project:
             r["ci"] = ci.get(r["sha"]) or r.get("ci")  # GitHub's comes with the request
         return {"requests": reqs, "at": at, "error": err}
 
+    def merged(self, max_age, force):
+        rows, at, err = self.cached("merged", max_age, lambda: self.forge.merged(time.time() - MERGED_DAYS * 86400),
+                                    [], force)
+        return {"merged": rows, "at": at, "error": err}
+
     def merge(self, iid, sha):
         text = self.forge.merge(iid, sha)
-        self.drop("requests", "request-ci", "pipelines")
+        self.drop("requests", "request-ci", "pipelines", "merged")
         self.stale_velocity()
         return {"ok": True, "text": text}
 
@@ -1671,6 +1738,7 @@ def main(argv):
     handlers = {
         "requests": lambda: p.requests(age(0), force(1)),
         "merge": lambda: p.merge(int(a[0]), a[1] if len(a) > 1 else ""),
+        "merged": lambda: p.merged(age(0), force(1)),
         "pipelines": lambda: p.pipelines(age(0), force(1)),
         "jobs": lambda: p.jobs(int(a[0]), age(1), force(2)),
         "pipeline-act": lambda: p.pipeline_act(int(a[0]), a[1]),

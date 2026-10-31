@@ -7,7 +7,7 @@ any of them; the README covers using the mods.
 
 | Mod | What it shows | forge.py commands |
 |---|---|---|
-| `forge-requests` | Open MRs (GitLab) / PRs (GitHub), with CI badges, Merge and action buttons | `requests`, `merge` |
+| `forge-requests` | Open MRs (GitLab) / PRs (GitHub), with CI badges, Merge and action buttons; then merged ones, their deploy, and Clean up | `requests`, `merge`, `merged` |
 | `forge-ci` | Recent pipelines / workflow runs; click for jobs; Retry, Cancel | `pipelines`, `jobs`, `pipeline-act` |
 | `forge-runners` | The project's own runners, what they run, jobs queued and stuck | `runners` |
 | `forge-milestones` | Active milestones with progress; expand for their issues | `milestones`, `milestone-items` |
@@ -37,6 +37,10 @@ and `npm test` fails when one is out of date. Machines that run forge.py must be
 - `folder`: the project's checkout on `on`, where agent actions start. `forge-requests`
   and `forge-issues` only.
 - `actions`: see [actions.md](actions.md). `forge-requests` and `forge-issues` only.
+- `deploy`: `{ label?, check }`, `forge-requests` only. `check` is run as `sh -c check sh <merge sha>`
+  in `folder` on `on`: exit 0 deployed, 1 not yet, anything else the check failed (its first
+  output line is shown). Run only once the merge commit's CI passed (or after 10 minutes with no
+  pipeline), at most once a minute per commit, never again after 0.
 
 `lib.js`'s `projectOf(props())` resolves these into `{ provider, host, repo, on, terms }`.
 Use `terms` for every forge word on screen: `terms.request` ("MR"/"PR"),
@@ -90,6 +94,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 |---|---|
 | `requests P <maxAge> <force>` | `{requests: [Request], at, error}` |
 | `merge P <iid> <sha>` | `{ok, text}` |
+| `merged P <maxAge> <force>` | `{merged: [Merged], at, error}`: merged in the last 7 days, newest first |
 | `pipelines P <maxAge> <force>` | `{pipelines: [Pipeline], at, error}` |
 | `jobs P <pipelineId> <maxAge> <force>` | `{jobs: [Job], at, error}` |
 | `pipeline-act P <pipelineId> retry\|cancel` | `{ok}` |
@@ -114,7 +119,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `version` | `{version, shapes}` |
 
 Writes (`merge`, `pipeline-act`, `update`, `comment`, triage ones) answer `{error}` instead
-when they fail; nothing is cached for them. Writes drop the cached answers they change: `merge` drops requests, CI and velocity;
+when they fail; nothing is cached for them. Writes drop the cached answers they change: `merge` drops requests, merged, CI and velocity;
 `pipeline-act` drops CI and runners' jobs; `update` drops milestones and velocity.
 Velocity isn't a cached answer: dropping it sets `velocity_at` to 0, so its next read fetches.
 
@@ -129,6 +134,11 @@ Request    {iid, title, url, draft, auto_merge, conflicts, source, target, sha, 
             labels[], created_ms, updated_ms, ci: {id, status, url, updated_ms} | null}
            fork: the source branch is in another project (a fork), so `source` names a
            branch that isn't in this repo
+Merged     {iid, title, url, author, source, target, fork, head_sha, merge_sha, merged_ms,
+            ci: {id, status, url, updated_ms} | null}
+           merge_sha: what landed on target (the merge or squash commit; the head for a
+           fast-forward); ci: the newest pipeline for merge_sha on target (GitLab), the merge
+           commit's rolled-up checks (GitHub, id null), null when none ran
 Pipeline   {id, iid, ref, sha, status, source, updated_ms, url, name?} ref: "main" or "!811";
            source: "request" (an MR/PR pipeline), else the forge's word (push, schedule, web...);
            name: the workflow's name (GitHub only)

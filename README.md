@@ -90,6 +90,35 @@ Some things to know about the agent buttons:
 - **To turn them off**, set `"actions": []` on the merge requests panel. To keep them and add your
   own, use `"actions": ["defaults", { ... }]` (see [docs/actions.md](docs/actions.md)).
 
+### After a merge
+
+Under the open MRs, **Merged lately** lists what merged in the last day, and older merges an agent
+is still on. Each row shows how far its merge got: the pipeline on the merge commit, then, if you
+set up a deploy check, whether it's live. The agents still on the branch are listed underneath.
+
+Hover a merged MR for **Clean up**. It shows you exactly what will go, then:
+
+- closes the agent's tab when everything in the tab is in that worktree, else ends just the agent
+  (ending an agent ends its sub-agents too);
+- removes the worktree with `git worktree remove` and deletes its local branch.
+
+It keeps the worktree when it has uncommitted changes, untracked files or commits that weren't
+merged, and never touches the main checkout. It waits while any of those agents is working or
+needs you. The button is solid once the merge is deployed. Before that it still works, and its
+confirm says what hasn't happened yet (say, the pipeline failed on the merge commit).
+
+**Deploy check.** Forge can't know how your project deploys, so by default "done" means the merge
+commit's pipeline passed. To wait for the real deploy, give the merge requests panel a `deploy`
+prop. `check` is a shell snippet run in the project's checkout (`folder`), on the forge machine
+(`on`), with the merge commit as `$1`. Exit 0 means deployed and 1 means not yet; anything else
+means the check failed. Its first line of output shows in the tooltip. It runs about once a
+minute, only after CI passes, and stops once it says yes. For example, with Flux image
+automation, where a bot commits the new image tag (`…:<pipeline>-<sha>`) to main:
+
+```json
+"deploy": { "label": "Flux", "check": "git fetch -q origin main; img=$(git log origin/main --author=fluxcdbot -n1 --format=%s | sed -n 's/.*-\\([0-9a-f]*\\)$/\\1/p'); [ -n \"$img\" ] || exit 2; git merge-base --is-ancestor \"$1\" \"$img\"" }
+```
+
 ## Issues
 
 ![The issue browser filtered to low priority: filters from scoped labels on the left, the list, and an issue with its fields as dropdowns](docs/issues.png)
@@ -207,6 +236,7 @@ Each panel is a mod, so you can place it in a layout of your own (a clone of `ma
 | `host` | Your forge's host name, if it isn't gitlab.com (or github.com with `provider: github`). |
 | `folder` | The project's checkout on that machine, where agents start (merge requests and issues). |
 | `actions` | Your own buttons (merge requests and issues). |
+| `deploy` | `{ "label": "Flux", "check": "…" }`: how to tell a merge is live (merge requests; see [After a merge](#after-a-merge)). |
 
 Each panel's other props are listed at the top of its `main.js`. To add a Forge button to a tab bar
 you've cloned, give the tab bar a button that runs `run("mod.open", { name: "forge-window" })`.
@@ -219,6 +249,9 @@ you've cloned, give the tab bar a button that runs `run("mod.open", { name: "for
   panels don't ask.
 - **Writes to the forge** only when you click: Merge, Retry, Cancel, issue edits and comments, and
   accepting triage proposals.
+- **Local changes** only when you click Clean up on a merged MR: it ends that MR's agents and removes
+  their worktree and local branch, after showing you the list. A `deploy` check you set runs in your
+  checkout about once a minute while a merge waits for it.
 - **Agents:** buttons marked ✦ start agents with prompts that include issue and MR text. Anyone who can open
   an issue or MR wrote that text. The built-in prompts tell the agent to treat it as data and to ask
   before merging. Review your own prompts the same way.

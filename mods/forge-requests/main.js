@@ -7,10 +7,12 @@ import { forgeClient, projectOf, actionList, matches, runAction, describe, actio
 import { Chrome, button, chip, note, pill, staleError } from "./ui.js";
 import {
   CI, defaultActions, mergeTip, checkoutOf, liveAgents, itemOf, agentPlaces, parseGitLook, ownersOf, askTarget, askText,
+  GIT_LOOK, shownMerged, deployState, checkDue, cleanupPlan, cleanupLines, notDoneWhy, CLEAN_WORKTREE,
 } from "./requests.js";
 
-// Open merge requests (GitLab) / pull requests (GitHub) for one project, through forge.py.
-// props: { repo, on?, provider?, host?, folder?, actions? } (docs/contract.md, docs/actions.md)
+// Open merge requests (GitLab) / pull requests (GitHub) for one project, through forge.py,
+// then the ones merged lately: did they deploy, and Clean up their agents and worktrees.
+// props: { repo, on?, provider?, host?, folder?, actions?, deploy? } (docs/contract.md, docs/actions.md)
 // forge.py runs on `on` (where glab or gh is logged in); links open in this computer's browser.
 
 const MOD = "forge-requests";
@@ -21,9 +23,9 @@ const STATUS = { working: "Working", blocked: "Needs you", done: "Done", idle: "
 
 const message = (e) => String(e?.message ?? e);
 
-// Each agent folder's branch and remote, looked up with git on the agent's machine.
+// Each agent folder's branch and remote (GIT_LOOK), looked up with git on the agent's machine.
 // A folder whose pane reports its branch only needs the remote, which rarely changes.
-const GIT_LOOK = `printf '%s\\n%s\\n' "$(git branch --show-current 2>/dev/null)" "$(git remote get-url origin 2>/dev/null)"`;
+const DEPLOY_EVERY = 60 * 1000;      // a deploy check that said "not yet" runs again after this
 const LOOK_EVERY = 60 * 1000;        // folders whose branch only git knows (sub-agents)
 const LOOK_EVERY_PANE = 10 * 60 * 1000;
 
@@ -45,6 +47,11 @@ export default class ForgeRequests extends View {
     this.drawn = 0;
     this.git = new Map();     // place key -> { branch, remote, at }
     this.looking = false;
+    this.merged = [];         // merged lately (forge.py `merged`), newest first
+    this.mergedError = null;
+    this.checks = new Map();  // merge sha -> { state: "yes"|"no"|"error", text, at } from props.deploy
+    this.checking = false;
+    this.shownMerged = [];    // the merged rows on screen, from the last render
     this.refresh(cx, -1, false); // whatever is cached, however old: draw at once
     // Only while on screen and not collapsed; showing it again asks at once if it's due.
     cx.timer.every(1000, (cx) => {
@@ -52,6 +59,7 @@ export default class ForgeRequests extends View {
       if (Date.now() - this.asked >= POLL * 1000) this.refresh(cx, POLL, false);
       else if (Date.now() - this.drawn >= 30000) cx.notify(); // keep the ages moving
       this.lookAtAgents(cx);
+      this.checkDeploys(cx);
     });
   }
 
@@ -63,7 +71,7 @@ export default class ForgeRequests extends View {
   // Asks git about agent folders it hasn't seen, or not lately: one at a time, so a
   // machine that's away holds up nothing else.
   lookAtAgents(cx) {
-    if (this.looking || !this.requests.length) return;
+    if (this.looking || (!this.requests.length && !this.merged.length)) return;
     const now = Date.now();
     const due = [];
     for (const pl of this.places().values()) {
@@ -112,6 +120,105 @@ export default class ForgeRequests extends View {
     });
   }
 
+  // Runs the project's deploy check (props.deploy.check) for merged requests on screen whose
+  // CI is through: one at a time, in the checkout, with the merge commit as $1.
+  // Exit 0: deployed. 1: not yet. Anything else: the check itself failed.
+  checkDeploys(cx) {
+    const p = props() ?? {};
+    if (!p.deploy?.check || this.checking) return;
+    const now = Date.now();
+    const due = this.shownMerged.filter((m) => checkDue(m, p.deploy, this.checks, now, DEPLOY_EVERY));
+    if (!due.length) return;
+    const project = projectOf(p);
+    const folder = checkoutOf(p.folder, spaces(), project.on, project.repo);
+    this.checking = true;
+    cx.spawn(async (cx) => {
+      for (const m of due) {
+        let res;
+        if (!folder) res = { state: "error", text: "No checkout of the repo found (set props.folder)." };
+        else {
+          try {
+            const r = await exec("sh", ["-c", p.deploy.check, "sh", m.merge_sha], { cwd: folder, on: project.on });
+            const text = `${r.stdout ?? ""}\n${r.stderr ?? ""}`.trim().split("\n")[0] || null;
+            res = { state: r.code === 0 ? "yes" : r.code === 1 ? "no" : "error", text: text ?? (r.code > 1 ? `exited ${r.code}` : null) };
+          } catch (e) {
+            res = { state: "error", text: message(e) };
+          }
+        }
+        const was = this.checks.get(m.merge_sha)?.state;
+        this.checks.set(m.merge_sha, { ...res, at: Date.now() });
+        if (res.state === "yes" && was && was !== "yes") {
+          const { terms } = projectOf(p);
+          try { notify({ title: `Deployed · ${terms.reqPrefix}${m.iid}`, body: m.title ?? "", level: "success" }); } catch {}
+        }
+        cx.notify();
+      }
+      this.checking = false;
+    });
+  }
+
+  // Clean up, step one: look at the owners' folders again (HEAD may have moved since the
+  // last look), then show exactly what will go.
+  prepareCleanup(m, owners, cx) {
+    this.busy = { ...this.busy, [m.iid]: "Checking…" };
+    this.notice = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      for (const o of owners) {
+        try {
+          const r = await exec("sh", ["-c", GIT_LOOK], { cwd: o.cwd, on: o.machine });
+          this.git.set(o.key, { ...parseGitLook(r.stdout), at: Date.now() });
+        } catch {}
+      }
+      const places = this.places();
+      const project = projectOf(props() ?? {});
+      const fresh = ownersOf(m, places, this.git, project);
+      let ps = [], ks = [];
+      try { ps = panes(); ks = terminals(); } catch {}
+      const plan = cleanupPlan(m, fresh, places, ps, ks, this.git);
+      this.done(m.iid);
+      if (plan.blocked) this.notice = { iid: m.iid, text: `Not yet: ${plan.blocked}.`, error: true };
+      else if (!plan.tabs.length && !plan.kills.length && !plan.worktrees.length) this.notice = { iid: m.iid, text: "Nothing left to clean up.", error: false };
+      else this.confirming = { iid: m.iid, id: "cleanup", plan };
+      cx.notify();
+    });
+  }
+
+  // Clean up, step two: close the tabs, end the agents, then remove each worktree and its
+  // branch (CLEAN_WORKTREE checks again and refuses anything that wasn't merged).
+  cleanup(m, plan, cx) {
+    this.confirming = null;
+    this.busy = { ...this.busy, [m.iid]: "Cleaning up…" };
+    this.notice = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const said = [], failed = [];
+      try {
+        // confirmed: our own confirm already listed the tab.
+        for (const t of plan.tabs) { run("tab.close", { id: t.id, confirmed: true }); said.push(`closed ${t.name}`); }
+        for (const k of plan.kills) { run("terminal.kill", { terminal: k.address }); said.push(`ended ${k.name}`); }
+        if (plan.worktrees.length && (plan.tabs.length || plan.kills.length)) await cx.sleep(1000); // let their shells go
+        for (const w of plan.worktrees) {
+          try {
+            const r = await exec("sh", ["-c", CLEAN_WORKTREE, "sh", w.top, w.branch, m.head_sha ?? ""], { on: w.machine });
+            const text = (r.stdout || r.stderr || "").trim().split("\n").pop();
+            (r.code === 0 ? said : failed).push(text || `exited ${r.code}`);
+          } catch (e) {
+            failed.push(`${w.top}: ${message(e)}`);
+          }
+          for (const [key, g] of this.git) if (g.top === w.top) this.git.delete(key);
+        }
+      } catch (e) {
+        failed.push(message(e));
+      }
+      const text = [...said, ...failed].join("; ") || "Done";
+      this.notice = { iid: m.iid, text: text[0].toUpperCase() + text.slice(1), error: failed.length > 0 };
+      this.toast(m, failed.length ? "Clean up incomplete" : "Cleaned up", this.notice);
+      this.done(m.iid);
+      cx.notify();
+    });
+  }
+
   refresh(cx, maxAge, force) {
     const { provider, host, repo, on } = projectOf(props() ?? {});
     if (!provider || !repo) return;
@@ -131,6 +238,14 @@ export default class ForgeRequests extends View {
         this.error = out?.error ?? null;
       } catch (e) {
         this.error = message(e);
+      }
+      cx.notify();
+      try {
+        const out = await this.forge(["merged", provider, host, repo, maxAge, force ? 1 : 0], { on });
+        if (Array.isArray(out?.merged)) this.merged = out.merged;
+        this.mergedError = out?.error ?? null;
+      } catch (e) {
+        this.mergedError = message(e);
       } finally {
         this.loading = false;
         const again = this.again;
@@ -251,6 +366,69 @@ export default class ForgeRequests extends View {
         .child(waiting ? "CI" : STATUS[a.status] ?? a.status ?? ""));
   }
 
+  // Where the merge commit's deploy is: the project's check (props.deploy), as a chip.
+  deployChip(t, m, deploy, st) {
+    const label = deploy.label ?? "Deploy";
+    const looks = {
+      waiting: ["○", t.dim, "Waits for CI to pass"],
+      blocked: ["–", t.dim, "CI failed on the merge commit, so it won't deploy"],
+      checking: [null, t.working, "Checking…"],
+      no: [CLOCK, t.working, "Not deployed yet"],
+      yes: ["✓", t.ansi2, "Deployed"],
+      error: ["?", t.ansi1, "The deploy check failed"],
+    };
+    const [mark, color, what] = looks[st.deploy] ?? looks.waiting;
+    const icon = mark === null ? svg(SPINNER).size(10).text_color(color).spin(900)
+      : mark === CLOCK ? svg(CLOCK).size(10).text_color(color) : div().child(mark);
+    return h_flex().id(`dep-${m.iid}`).flex_none().gap(3).items_center().px(2).text_size(11).text_color(color)
+      .tooltip(`${label}: ${what}${st.text ? ` · ${st.text}` : ""}`)
+      .child(icon).child(div().child(label));
+  }
+
+  // A merged request: its CI and deploy, the agents still on it, and Clean up (on hover,
+  // like the open rows' buttons): the solid button once it's deployed, else a plain one
+  // whose confirm says what isn't done (a merge that never reached CI shouldn't strand its agent).
+  mergedRow(t, m, p, terms, now, owners, agentList) {
+    const st = deployState(m, p.deploy, this.checks, now);
+    const busy = this.busy[m.iid];
+    const hov = this.hovered === m.iid && !busy && this.confirming?.iid !== m.iid;
+    const canClean = hov && owners.length > 0;
+    const ci = m.ci && CI[m.ci.status] ? m : null;
+    return v_flex().id(`mg-${m.iid}`).px(8).py(5).gap(3).rounded(6).cursor_pointer()
+      .hover((s) => s.bg(t.hover))
+      .on_hover((on, cx) => {
+        if (on) this.hovered = m.iid; else if (this.hovered === m.iid) this.hovered = null;
+        cx.notify();
+      })
+      .on_click(() => openUrl(exec, m.url))
+      .child(h_flex().gap(6).items_center()
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(`${terms.reqPrefix}${m.iid}`))
+        .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.muted).child(m.title ?? ""))
+        .when(Boolean(ci), (e) => e.child(this.ciBadge(t, ci, terms)))
+        .when(!ci && st.ci === "none", (e) => e.child(div().id(`noci-${m.iid}`).flex_none().text_size(11).text_color(t.dim)
+          .tooltip(`No ${terms.ciRun} ran on the merge commit`).child("no CI")))
+        .when(Boolean(p.deploy?.check), (e) => e.child(this.deployChip(t, m, p.deploy, st)))
+        .when(Boolean(busy), (e) => e.child(div().flex_none().text_size(11).text_color(t.muted).child(busy)))
+        .when(canClean, (e) => e.child(button(t, `clean-${m.iid}`, "Clean up", (cx) => this.prepareCleanup(m, owners, cx), {
+          tone: st.done ? "primary" : null,
+          tooltip: `${st.done ? "" : `Not deployed yet: ${notDoneWhy(st, p.deploy, terms)}. `}Ends the agents still on this branch and removes its worktree and local branch. Shows exactly what goes first; never touches uncommitted or unmerged work.`,
+        }))))
+      .when(this.confirming?.iid === m.iid && this.confirming.id === "cleanup", (e) => e.child(v_flex().gap(4).text_size(11.5)
+        .children(cleanupLines(this.confirming.plan, notDoneWhy(st, p.deploy, terms)).map((l) => div()
+          .text_color(l.startsWith("Not deployed") ? t.ansi3 ?? t.working : l.startsWith("Keep ") ? t.muted : t.foreground).child(l)))
+        .child(h_flex().gap(6).justify_end()
+          .child(button(t, `cancel-${m.iid}`, "Cancel", (cx) => { this.confirming = null; cx.notify(); }))
+          .child(button(t, `yes-${m.iid}`, "Clean up", (cx) => this.cleanup(m, this.confirming.plan, cx), { tone: "danger" })))))
+      .when(this.notice?.iid === m.iid, (e) => e.child(div().text_size(11)
+        .text_color(this.notice.error ? t.ansi1 : t.muted).child(this.notice.text)))
+      .child(h_flex().gap(6).items_center().text_size(11).text_color(t.muted)
+        .child(div().flex_none().child(m.author ?? ""))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(m.source ?? ""))
+        .child(div().id(`mgd-${m.iid}`).flex_none().text_size(10).text_color(t.dim)
+          .tooltip(`Merged ${agoAt(m.merged_ms)}`).child(`merged ${ago(m.merged_ms)}`)))
+      .children(agentList.map((a) => this.agentRow(t, m, a)));
+  }
+
   render(_cx) {
     this.drawn = Date.now();
     const t = theme(), p = props() ?? {};
@@ -270,7 +448,7 @@ export default class ForgeRequests extends View {
       body = note(t, `${project.host} isn't a forge this panel supports yet (GitLab, GitHub).`);
     } else if (!repo) {
       body = note(t, "No repo set (props.repo).");
-    } else if (!this.requests.length) {
+    } else if (!this.requests.length && !this.merged.length) {
       body = this.error ? note(t, this.error, { error: true })
         : note(t, this.loading ? "Loading…" : `No open ${terms.requests.toLowerCase()}.`);
     } else {
@@ -340,8 +518,15 @@ export default class ForgeRequests extends View {
           }, { tone: toneOf(a) ?? "primary" }));
       };
 
+      // Merged lately: the last day's, and older ones an agent is still on.
+      const now = Date.now();
+      const recent = shownMerged(this.merged, ownersOfReq, now);
+      this.shownMerged = recent;
+
       body = v_flex().id("rq-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
         .when(Boolean(this.error), (e) => e.child(staleError(t, this.error)))
+        .when(!this.requests.length, (e) => e.child(div().px(8).py(6).text_size(12).text_color(t.muted)
+          .child(`No open ${terms.requests.toLowerCase()}.`)))
         .children(this.requests.map((r) => {
           const busy = this.busy[r.iid];
           const shown = hov === r ? hovActions : [];
@@ -387,7 +572,11 @@ export default class ForgeRequests extends View {
               .children((r.labels ?? []).slice(0, 3).map((l) => pill(t, l)))
               .child(div().id(`upd-${r.iid}`).flex_none().text_size(10).text_color(t.dim).tooltip(`Updated ${agoAt(r.updated_ms)}`).child(ago(r.updated_ms))))
             .children(agentsOf(r).map((a) => this.agentRow(t, r, a)));
-        }));
+        }))
+        .when(recent.length > 0 || Boolean(this.mergedError), (e) => e
+          .child(div().px(8).pt(10).pb(2).text_size(11).text_color(t.dim).child("Merged lately"))
+          .when(Boolean(this.mergedError), (e) => e.child(staleError(t, this.mergedError)))
+          .children(recent.map((m) => this.mergedRow(t, m, p, terms, now, ownersOfReq(m), agentsOf(m)))));
     }
 
     return v_flex().id("requests").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
