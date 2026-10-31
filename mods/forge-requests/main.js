@@ -366,6 +366,19 @@ export default class ForgeRequests extends View {
         .child(waiting ? "CI" : STATUS[a.status] ?? a.status ?? ""));
   }
 
+  // "Merged lately" folded, per project, remembered across restarts. Deploy checks keep
+  // running while it's folded, so the "Deployed" toast still comes.
+  mergedFolded(repo) {
+    this.folded ??= (() => { try { return JSON.parse(localStorage.getItem("mergedFolded") ?? "{}"); } catch { return {}; } })();
+    return Boolean(this.folded[repo]);
+  }
+
+  foldMerged(repo, on) {
+    this.mergedFolded(repo);
+    if (on) this.folded[repo] = true; else delete this.folded[repo];
+    try { localStorage.setItem("mergedFolded", JSON.stringify(this.folded)); } catch {}
+  }
+
   // Where the merge commit's deploy is: the project's check (props.deploy), as a chip.
   deployChip(t, m, deploy, st) {
     const label = deploy.label ?? "Deploy";
@@ -574,9 +587,16 @@ export default class ForgeRequests extends View {
             .children(agentsOf(r).map((a) => this.agentRow(t, r, a)));
         }))
         .when(recent.length > 0 || Boolean(this.mergedError), (e) => e
-          .child(div().px(8).pt(10).pb(2).text_size(11).text_color(t.dim).child("Merged lately"))
-          .when(Boolean(this.mergedError), (e) => e.child(staleError(t, this.mergedError)))
-          .children(recent.map((m) => this.mergedRow(t, m, p, terms, now, ownersOfReq(m), agentsOf(m)))));
+          .child(h_flex().id("merged-head").gap(4).items_center().px(8).pt(10).pb(2).rounded(4).cursor_pointer()
+            .text_size(11).text_color(t.dim).hover((s) => s.text_color(t.muted))
+            .tooltip(this.mergedFolded(repo) ? "Show merged" : "Hide merged")
+            .on_click((_e, cx) => { this.foldMerged(repo, !this.mergedFolded(repo)); cx.notify(); })
+            .child(div().w(12).flex_none().text_size(9).child(this.mergedFolded(repo) ? "▸" : "▾"))
+            .child(div().child("Merged lately"))
+            .child(div().text_color(t.dim).child(String(recent.length))))
+          .when(!this.mergedFolded(repo), (e) => e
+            .when(Boolean(this.mergedError), (e) => e.child(staleError(t, this.mergedError)))
+            .children(recent.map((m) => this.mergedRow(t, m, p, terms, now, ownersOfReq(m), agentsOf(m))))));
     }
 
     return v_flex().id("requests").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
