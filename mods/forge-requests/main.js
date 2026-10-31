@@ -1,11 +1,13 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import {
-  exec, readTextFile, appHome, props, theme, shared, agents, terminals, run, spaces, knownAgents, openOverlay, notify,
+  exec, readTextFile, appHome, props, theme, shared, agents, terminals, panes, run, spaces, knownAgents, openOverlay, notify,
 } from "herdr";
 import { forgeClient, projectOf, actionList, matches, runAction, describe, actionLabel, fill, ago, openUrl } from "./lib.js";
 import { Chrome, button, chip, note, pill, staleError } from "./ui.js";
-import { CI, defaultActions, mergeTip, checkoutOf, liveAgents, itemOf } from "./requests.js";
+import {
+  CI, defaultActions, mergeTip, checkoutOf, liveAgents, itemOf, agentPlaces, parseGitLook, ownersOf, askTarget, askText,
+} from "./requests.js";
 
 // Open merge requests (GitLab) / pull requests (GitHub) for one project, through forge.py.
 // props: { repo, on?, provider?, host?, folder?, actions? } (docs/contract.md, docs/actions.md)
@@ -18,6 +20,12 @@ const CLOCK = `mods/${MOD}/clock.svg`;
 const STATUS = { working: "Working", blocked: "Needs you", done: "Done", idle: "Idle" };
 
 const message = (e) => String(e?.message ?? e);
+
+// Each agent folder's branch and remote, looked up with git on the agent's machine.
+// A folder whose pane reports its branch only needs the remote, which rarely changes.
+const GIT_LOOK = `printf '%s\\n%s\\n' "$(git branch --show-current 2>/dev/null)" "$(git remote get-url origin 2>/dev/null)"`;
+const LOOK_EVERY = 60 * 1000;        // folders whose branch only git knows (sub-agents)
+const LOOK_EVERY_PANE = 10 * 60 * 1000;
 
 export default class ForgeRequests extends View {
   init(_props, cx) {
@@ -35,12 +43,72 @@ export default class ForgeRequests extends View {
     this.notice = null;     // { iid, text, error } from the last merge or action
     this.asked = 0;         // when we last asked forge.py (ms)
     this.drawn = 0;
+    this.git = new Map();     // place key -> { branch, remote, at }
+    this.looking = false;
     this.refresh(cx, -1, false); // whatever is cached, however old: draw at once
     // Only while on screen and not collapsed; showing it again asks at once if it's due.
     cx.timer.every(1000, (cx) => {
       if (!this.chrome.visible()) return;
       if (Date.now() - this.asked >= POLL * 1000) this.refresh(cx, POLL, false);
       else if (Date.now() - this.drawn >= 30000) cx.notify(); // keep the ages moving
+      this.lookAtAgents(cx);
+    });
+  }
+
+  // Where the agents are, from Herdr (cheap; read again on every render).
+  places() {
+    try { return agentPlaces(agents(), panes(), terminals()); } catch { return new Map(); }
+  }
+
+  // Asks git about agent folders it hasn't seen, or not lately: one at a time, so a
+  // machine that's away holds up nothing else.
+  lookAtAgents(cx) {
+    if (this.looking || !this.requests.length) return;
+    const now = Date.now();
+    const due = [];
+    for (const pl of this.places().values()) {
+      const g = this.git.get(pl.key);
+      if (!g || now - g.at >= (pl.branch ? LOOK_EVERY_PANE : LOOK_EVERY)) due.push(pl);
+    }
+    if (!due.length) return;
+    this.looking = true;
+    cx.spawn(async (cx) => {
+      const seen = new Set();
+      for (const pl of due) {
+        if (seen.has(pl.key)) continue;
+        seen.add(pl.key);
+        try {
+          const r = await exec("sh", ["-c", GIT_LOOK], { cwd: pl.cwd, on: pl.machine });
+          this.git.set(pl.key, { ...parseGitLook(r.stdout), at: Date.now() });
+        } catch {
+          // Machine away or folder gone: keep what we had, look again later.
+          this.git.set(pl.key, { ...(this.git.get(pl.key) ?? { branch: null, remote: null }), at: Date.now() });
+        }
+      }
+      this.looking = false;
+      cx.notify();
+    });
+  }
+
+  // Types into the agent that owns a request (hc send: as if you typed it and pressed Enter).
+  ask(target, kind, r, cx) {
+    const { terms } = projectOf(props() ?? {});
+    this.confirming = null;
+    this.busy = { ...this.busy, [r.iid]: "Asking…" };
+    this.notice = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const out = await exec("hc", ["send", target.address, askText(kind, r, terms)]);
+        if (out?.code) throw new Error((out.stderr || out.stdout || `hc send failed (${out.code})`).trim());
+        this.notice = { iid: r.iid, text: `Asked ${target.name}`, error: false };
+      } catch (e) {
+        this.notice = { iid: r.iid, text: message(e), error: true };
+      } finally {
+        this.toast(r, this.notice.error ? "Couldn't ask the agent" : "Asked the agent", this.notice);
+        this.done(r.iid);
+        cx.notify();
+      }
     });
   }
 
@@ -208,20 +276,42 @@ export default class ForgeRequests extends View {
     } else {
       // Only the hovered row shows buttons, so only it needs the actions worked out.
       const hov = this.hovered != null ? this.requests.find((r) => r.iid === this.hovered) : null;
-      let hovActions = [];
+      // Agents already working on each request: on its branch, in a checkout of this project.
+      const places = this.places();
+      const ownersCache = new Map();
+      const ownersOfReq = (r) => {
+        if (!ownersCache.has(r.iid)) ownersCache.set(r.iid, ownersOf(r, places, this.git, project));
+        return ownersCache.get(r.iid);
+      };
+      let hovActions = [], hovAsk = null;
       if (hov && !this.busy[hov.iid] && this.confirming?.iid !== hov.iid) {
         const item = itemOf(hov, project);
         hovActions = actionList(p.actions, defaultActions(terms), shared(`${MOD}.actions`)).filter((a) => matches(a.when, item));
+        // An agent owns it: ask that agent instead of starting another one. Not while it
+        // shows a prompt: typed text would answer the prompt.
+        const target = askTarget(ownersOfReq(hov), places);
+        if (target) {
+          hovActions = hovActions.filter((a) => a.id !== "ship" && a.id !== "resolve");
+          if (target.status !== "blocked") hovAsk = { target, kind: hov.conflicts ? "conflicts" : "merge" };
+        }
       }
       // Agents per request (forge.requestAgents), with live status: the maps once per render.
       const byUrl = shared("forge.requestAgents");
       let byAgent = null, byTerminal = null;
-      const agentsOf = (url) => {
-        const list = byUrl?.[url];
-        if (!list?.length) return [];
-        byAgent ??= new Map(agents().map((a) => [a.address, a]));
-        byTerminal ??= new Map(terminals().map((k) => [k.address, k]));
-        return liveAgents(list, byAgent, byTerminal);
+      const agentsOf = (r) => {
+        const list = byUrl?.[r.url];
+        let out = [];
+        if (list?.length) {
+          byAgent ??= new Map(agents().map((a) => [a.address, a]));
+          byTerminal ??= new Map(terminals().map((k) => [k.address, k]));
+          out = liveAgents(list, byAgent, byTerminal);
+        }
+        // Plus the ones found here (another mod may publish some of the same).
+        const have = new Set(out.map((a) => a.address));
+        for (const o of ownersOfReq(r)) {
+          if (!have.has(o.address)) out.push({ address: o.address, name: o.name, pane: o.pane, program: o.program, status: o.status });
+        }
+        return out;
       };
       // tone "danger" draws red (Fix conflicts), primary the solid button color.
       const toneOf = (a) => a?.tone === "danger" ? "danger" : a?.primary ? "primary" : null;
@@ -229,6 +319,15 @@ export default class ForgeRequests extends View {
       const actionById = (id) => actionList(p.actions, defaultActions(terms), shared(`${MOD}.actions`)).find((a) => a.id === id);
       const confirmRow = (r) => {
         const c = this.confirming;
+        if (c.id === "ask") {
+          // Says exactly what will be typed into which agent.
+          return v_flex().gap(4).text_size(11.5)
+            .child(div().text_color(t.foreground).child(`Send to ${c.target.name}:`))
+            .child(div().px(6).py(4).rounded(4).bg(t.raised).text_color(t.muted).child(askText(c.kind, r, terms)))
+            .child(h_flex().gap(6).justify_end()
+              .child(button(t, `cancel-${r.iid}`, "Cancel", (cx) => { this.confirming = null; cx.notify(); }))
+              .child(button(t, `yes-${r.iid}`, "Send", (cx) => this.ask(c.target, c.kind, r, cx), { tone: "primary" })));
+        }
         const a = c.id === "merge" ? null : actionById(c.id);
         const question = c.id === "merge" ? `Merge into ${r.target ?? "target"}?` : fill(a?.confirm ?? "", itemOf(r, project));
         return h_flex().gap(6).items_center().text_size(11.5)
@@ -267,6 +366,14 @@ export default class ForgeRequests extends View {
                 if (a.confirm) this.confirming = { iid: r.iid, id: a.id }; else { this.act(a, r, cx); return; }
                 cx.notify();
               }, { tone: toneOf(a), tooltip: describe(a) })))
+              .when(hov === r && Boolean(hovAsk), (e) => e.child(button(t, `ask-${r.iid}`,
+                hovAsk.kind === "conflicts" ? "✦ Ask to fix conflicts" : "✦ Ask to merge", (cx) => {
+                  this.confirming = { iid: r.iid, id: "ask", kind: hovAsk.kind, target: hovAsk.target };
+                  cx.notify();
+                }, { tone: hovAsk.kind === "conflicts" ? "danger" : null,
+                  tooltip: hovAsk.kind === "conflicts"
+                    ? `Asks ${hovAsk.target.name}, the agent already on this branch, to rebase and resolve the conflicts. Never merges. Shows the message first.`
+                    : `Asks ${hovAsk.target.name}, the agent already on this branch, to get it ready and merge once CI passes. Shows the message first.` })))
               .when(mergeable, (e) => e.child(button(t, `merge-${r.iid}`, "Merge", (cx) => {
                 this.confirming = { iid: r.iid, id: "merge" };
                 cx.notify();
@@ -279,7 +386,7 @@ export default class ForgeRequests extends View {
               .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(r.source ?? ""))
               .children((r.labels ?? []).slice(0, 3).map((l) => pill(t, l)))
               .child(div().flex_none().text_size(10).text_color(t.dim).child(ago(r.updated_ms))))
-            .children(agentsOf(r.url).map((a) => this.agentRow(t, r, a)));
+            .children(agentsOf(r).map((a) => this.agentRow(t, r, a)));
         }));
     }
 
