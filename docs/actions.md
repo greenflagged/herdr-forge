@@ -1,8 +1,8 @@
 # Adding your own buttons
 
-`forge-issues` and `forge-requests` show buttons on each issue or request. You choose
-them, so the panels fit how you work: start an agent with your own prompt, run a script,
-fire a Herdr command, or open a mod of your own with the item.
+`forge-issues` and `forge-requests` show buttons on each issue or request. You choose the
+buttons, so the panels fit how you work. A button can start an agent with your own prompt, run a
+script, fire a Herdr command, or open a mod of your own with the item.
 
 ## In the layout
 
@@ -19,11 +19,15 @@ fire a Herdr command, or open a mod of your own with the item.
 ```
 
 `props.actions` replaces the defaults. To keep them and add yours, put `"defaults"` in
-the list: `["defaults", { ... }]`. `forge-issues` has no defaults; `forge-requests` has
-**Ship** (on a request open a day or more: an agent fixes what's outstanding, then waits for
-your go-ahead before merging) and **Resolve** (on a conflicted request: an agent rebases it and
-force-pushes the branch, without merging). Both ask before starting, work in a worktree of the
-request's branch, and don't show on requests from forks.
+the list: `["defaults", { ... }]`. `forge-issues` has no defaults. `forge-requests` has two:
+
+- **Ship** shows on a request open for a day or more. An agent fixes what's outstanding, then
+  waits for your go-ahead before merging.
+- **Resolve** shows on a conflicted request. An agent rebases it and force-pushes the branch,
+  without merging.
+
+Both ask before starting, work in a worktree of the request's branch, and don't show on requests
+from forks.
 
 ## What an action can do
 
@@ -38,10 +42,12 @@ Every action has an `id` and a `label`, and does one of these:
 
 Optional on any action:
 
-- `when`: show it only for some items. `{ "labels": [...] }` needs all of them,
-  `{ "without": [...] }` none of them, `{ "minAgeHours": 24 }` an item at least that old,
-  and any other field is compared with the item's (`{ "state": "opened" }`,
-  `{ "conflicts": true }`, `{ "draft": [false] }`: a list means any of).
+- `when`: show the button only for some items. These conditions are available:
+  - `{ "labels": [...] }` needs all of those labels.
+  - `{ "without": [...] }` needs none of them.
+  - `{ "minAgeHours": 24 }` needs an item at least that old.
+  - Any other field is compared with the item's: `{ "state": "opened" }`,
+    `{ "conflicts": true }`, `{ "draft": [false] }`. A list means any of.
 - `confirm`: a question to ask before running it ("Close as won't fix?").
 - `primary`: draw it as the main button.
 - `tone: "danger"`: draw it red, for actions that rewrite history or can't be undone.
@@ -62,19 +68,19 @@ For a request from a fork, `source` is a branch in someone else's project, not y
 `worktree: true` actions refuse those (check fork MRs out by hand), and `when: { "fork":
 false }` hides an action from them.
 
-Titles and branch names come from whoever wrote them. `exec` never runs through a shell,
-so they can't inject a command, as long as placeholders are their own arguments:
+Titles and branch names come from whoever wrote them. `exec` never runs through a shell, so they
+can't inject a command, as long as each placeholder is its own argument:
 
 - Don't write `["sh", "-c", "echo {title}"]`; write `["sh", "-c", "echo \"$1\"", "sh", "{title}"]`.
-- A placeholder that is a whole argument and fills in something starting with `-` is
-  refused, since the program would read it as an option. Where the program allows it, put
-  `--` before such arguments anyway: `["git", "switch", "--", "{source}"]`.
+- If a placeholder is a whole argument and fills in text starting with `-`, Forge refuses to run
+  it, because the program would read the text as an option. Where the program allows it, put `--`
+  before such arguments anyway: `["git", "switch", "--", "{source}"]`.
 - An agent `task` hands the title to the agent as text: treat it like any untrusted input.
 
 ## From another mod, at run time
 
-A mod can add buttons without touching the layout, for example only while it's running
-or only for some repos:
+A mod can add buttons without touching the layout. For example, it can add them only while it's
+running, or only for some repos:
 
 ```js
 import { shared, setShared } from "herdr";
@@ -87,14 +93,13 @@ register();
 cx.timer.every(30 * 60000, () => register());
 ```
 
-Key the object by your mod's name so mods don't overwrite each other. An entry older than
-an hour is ignored, so the buttons of a mod that stopped or was removed go away by
-themselves; set `actions: []` to take yours away at once. Requests use
-`forge-requests.actions`.
+Key the object by your mod's name so mods don't overwrite each other. An entry older than an hour
+is ignored, so the buttons of a mod that stopped or was removed go away by themselves. Set
+`actions: []` to take yours away at once. Requests use `forge-requests.actions`.
 
-Registered actions run exactly like the ones in your layout: an agent in your checkout,
-a program on your machine, any Herdr command. Any mod you install can register them, so
-they have the same power as your own; only install mods you trust.
+Registered actions run exactly like the ones in your layout: an agent in your checkout, a program
+on your machine, any Herdr command. Any mod you install can register them, so they have the same
+power as your own. Only install mods you trust.
 
 ## Reacting to the issue browser
 
@@ -104,5 +109,5 @@ they have the same power as your own; only install mods you trust.
 - `shared("forge-issues.event")`: the last change it wrote, `{type, iid, repo, host, at}`,
   with `type` one of `updated`, `commented`, `closed`, `reopened`, `action`.
 
-And `forge.requestAgents` (`{requestUrl: [{address, name}]}`) lets an agents list tell the
-panels which agents are working on which request; they show each one's live status.
+And `forge.requestAgents` (`{requestUrl: [{address, name}]}`) lets an agents list tell the panels
+which agents are working on which request. The panels show each agent's live status.
