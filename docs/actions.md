@@ -54,7 +54,11 @@ Strings in `task`, `tab`, `folder`, `exec`, `cwd`, `args` and `overlay.props` fi
 
 | Both | Issues | Requests |
 |---|---|---|
-| `iid`, `ref` (`#12`, `!7`), `title`, `url`, `repo`, `host`, `provider`, `author`, `labels`, `created_ms` | `state`, `assignees`, `milestone` (title), `scoped` (`{priority: "high", type: "bug"}`) | `source`, `target`, `sha`, `draft`, `conflicts`, `ci_status` |
+| `iid`, `ref` (`#12`, `!7`), `title`, `url`, `repo`, `host`, `provider`, `author`, `labels`, `created_ms` | `state`, `assignees`, `milestone` (title), `scoped` (`{priority: "high", type: "bug"}`) | `source`, `target`, `sha`, `draft`, `conflicts`, `ci_status`, `fork` (true when the request comes from another project) |
+
+For a request from a fork, `source` is a branch in someone else's project, not yours:
+`worktree: true` actions refuse those (check fork MRs out by hand), and `when: { "fork":
+false }` hides an action from them.
 
 Titles and branch names come from whoever wrote them. `exec` never runs through a shell,
 so they can't inject a command, as long as placeholders are their own arguments:
@@ -85,6 +89,10 @@ Key the object by your mod's name so mods don't overwrite each other. An entry o
 an hour is ignored, so the buttons of a mod that stopped or was removed go away by
 themselves; set `actions: []` to take yours away at once. Requests use
 `forge-requests.actions`.
+
+Registered actions run exactly like the ones in your layout: an agent in your checkout,
+a program on your machine, any Herdr command. Any mod you install can register them, so
+they have the same power as your own; only install mods you trust.
 
 ## Reacting to the issue browser
 

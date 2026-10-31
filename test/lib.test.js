@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  actionList, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf,
+  actionList, checkoutOf, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf,
 } from "../shared/lib.js";
 
 test("projectOf defaults to GitLab and infers the provider from the host", () => {
@@ -122,6 +122,23 @@ test("runAction starts worktree actions in the request's checkout", async () => 
   assert.equal(h.calls[0][2].at(-1), "feat/x");
   assert.deepEqual(h.calls[1], ["run", "space.new", { folder: "/wt/shop/feat-x", machine: "mac", tab: "ship !3", argv: ["claude"], task: "merge !3" }]);
   await assert.rejects(runAction({ id: "s", label: "S", worktree: true, task: "x" }, { source: "-x" }, { folder: "/f" }, h), /No branch/);
+  const n = h.calls.length;
+  await assert.rejects(runAction({ id: "s", label: "S", worktree: true, task: "x" }, { source: "main", fork: true }, { folder: "/f" }, h),
+    /fork/, "a fork's branch name means nothing in our repo");
+  assert.equal(h.calls.length, n, "nothing ran");
+});
+
+test("checkoutOf matches the repo's folder name exactly", () => {
+  const spaces = [
+    { machine: null, folder: "/home/me/src/other-shop" },
+    { machine: null, folder: "/home/me/src/shopping" },
+    { machine: null, folder: "/home/me/.herdr/worktrees/acme-shop/" },
+    { machine: "mac", folder: "/u/src/shop" },
+  ];
+  assert.equal(checkoutOf(null, spaces, null, "acme/shop"), "/home/me/.herdr/worktrees/acme-shop/");
+  assert.equal(checkoutOf(null, spaces, null, "acme/api"), null);
+  assert.equal(checkoutOf(null, spaces.slice(0, 2), null, "acme/shop"), null, "other-shop is another project");
+  assert.equal(checkoutOf(null, spaces, "mac", "group/sub/shop"), "/u/src/shop");
 });
 
 test("item builders give actions their fields", () => {
@@ -129,6 +146,8 @@ test("item builders give actions their fields", () => {
   const r = requestItem({ iid: 3, title: "T", url: "u", source: "b", ci: { status: "failed" }, labels: [] }, project);
   assert.equal(r.ref, "!3");
   assert.equal(r.ci_status, "failed");
+  assert.equal(r.fork, false);
+  assert.equal(requestItem({ iid: 4, fork: true }, project).fork, true);
   const i = issueItem({ iid: 4, title: "T", labels: ["priority::high", "bug"], milestone: { title: "M1" }, state: "opened" }, project);
   assert.deepEqual(i.scoped, { priority: "high" });
   assert.equal(i.milestone, "M1");
@@ -178,6 +197,9 @@ test("forgeClient's boot and install code runs under real python", async () => {
   assert.ok(answers.every((a) => a.version === "0.2.0+aa"), JSON.stringify(answers));
   assert.ok(existsSync(`${dir}/forge-0.2.0+aa.py`));
   assert.match(readFileSync(`${dir}/forge.py`, "utf8"), /VERSION = "0.2.0\+aa"/, "a stable path for agents");
+  const { statSync } = await import("node:fs");
+  assert.equal(statSync(dir).mode & 0o777, 0o700, "the folder (caches with issue text) is private");
+  assert.equal(statSync(`${dir}/forge.py`).mode & 0o077, 0);
 
   // An older mod installing later doesn't take the stable path back.
   const old = forgeClient({ exec, readTextFile: async () => as("0.1.0+bb") }, "/x");

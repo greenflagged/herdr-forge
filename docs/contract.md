@@ -73,8 +73,13 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 - While one process fetches an answer, others asking for it get the last one (a 30 s
   lease), so panels in several windows don't fetch the same thing together.
 - **One call must finish within Herdr's 30 s limit, so `forge.py` stops work at ~18 s.**
-  `sync` and `accept-all` then answer `more: true`: call again soon. Velocity carries
-  on from where it stopped on its next fetch.
+  `sync` and `accept-all` then answer `more: true`: call again soon. While the last
+  `sync` ended with `more`, the next one carries on at once, forced or not (otherwise an
+  unforced `sync` fetches at most every 45 s). Velocity fetches merged requests and
+  closed issues separately, each from its own watermark: a walk cut short keeps the rows
+  it got and carries on from where it stopped on the next fetch, and the answer's `at`
+  moves only once both are complete. `milestones` past the budget starts no more count
+  calls: those milestones come with `open`, `closed`, `all` null.
 
 ### Commands
 
@@ -92,7 +97,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `milestone-items P <title> <maxAge> <force>` | `{items: [MilestoneItem], at, error}` |
 | `velocity P <maxAge> <force> <12w\|30d> <nowMs> <tzOffsetMin>` | `{n, size, start, at, error, rows: [Row]}` with row keys `merged`, `closed`, `cycle` |
 | `commits <top> <ref> <12w\|30d> <nowMs> <tzOffsetMin> <force>` | `{n, size, start, at, error, row: Row, total}`: run on the repo's machine. No maxAge: it re-reads git every 5 min and fetches an `origin/*` ref every 15; an empty ref means HEAD |
-| `sync P <since> <force>` | `{now, last_sync, error, changed, more, triage_at, triage_run}` |
+| `sync P <since> <force>` | `{now, last_sync, error, changed, more, triage_at, triage_run}`: `changed` counts issues written after `since` (an issue the forge sends again unchanged isn't rewritten) |
 | `meta P` | `{labels: [{name, color, description}], milestones: [{id, title, due}], sep}` |
 | `query P <json>` | `{rows, offset, matched, total, counts, scopes, sep}` (below) |
 | `search P <text>` | `{iids}`: full-text matches, best first |
@@ -101,21 +106,28 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `comment P <iid> <body>` | same as `show` |
 | `launch P <iid> <actionId> <tab>` | `{ok}`: records that an action started an agent |
 | `triage P <iid> accepted\|dismissed`, `lock P <iid> 0\|1` | `{ok}` |
-| `context P [chars]` | plain text: open issues for the triage agent |
-| `propose P <file.json>` | `{ok, issues, changes, skipped}` |
+| `context P [chars]` | plain text: open issues for the triage agent. Everything from the forge sits between `<<<UNTRUSTED ISSUE DATA ...>>>` and `<<<END UNTRUSTED ISSUE DATA>>>` lines, each field on one line with control characters removed |
+| `propose P <file.json>` | `{ok, issues, changes, skipped}`: the file is `[{iid, priority, rank, reason}]`, at most 5000 read; a `rank` that isn't a whole number is null |
 | `accept-all P` | `{accepted, failed, more}` |
-| `skill <status\|install> <name> <text> [replace]` | `{installed, current, older, foreign, version, path}`: `foreign` is a same-named skill that didn't come from herdr-forge; install leaves it alone unless given `replace` |
+| `skill <status\|install> <name> <text> [replace]` | `{installed, current, older, foreign, version, path}`: `foreign` is a same-named skill that didn't come from herdr-forge (its first line after the frontmatter isn't `<!-- Shipped with herdr-forge X.Y.Z`); install leaves it alone unless given `replace` |
 | `version` | `{version, shapes}` |
 
 Writes (`merge`, `pipeline-act`, `update`, `comment`, triage ones) answer `{error}` instead
 when they fail; nothing is cached for them. Writes drop the cached answers they change: `merge` drops requests, CI and velocity;
 `pipeline-act` drops CI and runners' jobs; `update` drops milestones and velocity.
+Velocity isn't a cached answer: dropping it sets `velocity_at` to 0, so its next read fetches.
+
+`show` cleans what it returns: titles, label and milestone names, assignees and authors
+are one line without control characters; descriptions and comments lose control
+characters but keep their newlines.
 
 ### Shapes
 
 ```
-Request    {iid, title, url, draft, auto_merge, conflicts, source, target, sha, author,
+Request    {iid, title, url, draft, auto_merge, conflicts, source, target, sha, fork, author,
             labels[], created_ms, updated_ms, ci: {id, status, url, updated_ms} | null}
+           fork: the source branch is in another project (a fork), so `source` names a
+           branch that isn't in this repo
 Pipeline   {id, iid, ref, sha, status, source, updated_ms, url}      ref: "main" or "!811";
            source: "request" (an MR/PR pipeline), else the forge's word (push, schedule, web...)
 Job        {id, name, group, status, duration, allow_failure, url}    group: stage / workflow
@@ -123,7 +135,8 @@ Runner     {id, name, status, paused, url, details, running: [jobId],
             tags[], run_untagged, version, platform, arch, contacted_ms}   last six: when details
 CiJob      {id, name, group, status, started_ms, created_ms, tags[], runner: {id, name} | null,
             ref, pipeline, url, elsewhere, stuck}
-Milestone  {id, title, due, url, open, closed, all}                  due: "YYYY-MM-DD" | null
+Milestone  {id, title, due, url, open, closed, all}                  due: "YYYY-MM-DD" | null;
+           open/closed/all: null when the call ran out of time before counting it
 MilestoneItem {id, iid, title, state, assignees[], url}              open ones first
 Row        {key, values: [n per bucket], now, avg, unit?: "duration", lowerBetter?}
 Issue      {iid, title, state, labels[], milestone: {id, title, due} | null, assignees[], author,
@@ -166,6 +179,8 @@ the nulls now:
 - `scopes`: scope names the project's issues use, in any state, most used first.
 - `sep`: the scoped-label separator (`::` on GitLab). Passing `sep` changes and remembers it.
 - `picked` uses the same group names; values within a group are OR, groups are AND.
+  The exception is `labels`: plain labels are independent tags, so picking `bug` and
+  `ui` means issues with both (AND), not either.
 
 ## lib.js
 
@@ -179,7 +194,9 @@ the nulls now:
 - `requestItem(request, project)`, `issueItem(issue, project, sep)`: the fields actions see.
 - `ago(ms)` ("now", "3m", "2h", "5d": write "3m ago" yourself, and "now" alone),
   `clock(seconds)`, `span(ms)`, `num(x, digits)`, `openUrl(exec, url)`.
-- `checkoutOf(folder, spaces(), on, repo)`: where agents start when `props.folder` is missing.
+- `checkoutOf(folder, spaces(), on, repo)`: where agents start when `props.folder` is
+  missing: a space on `on` whose folder is named exactly `<name>` or `<owner>-<name>`
+  (`shop` or `acme-shop` for `acme/shop`).
 - Actions: `fill`, `matches`, `actionList`, `describe`, `runAction`, `WORKTREE`. See
   actions.md.
 
@@ -218,7 +235,9 @@ Herdr doesn't update mods, and people copy them one at a time, so one machine ru
 several versions of forge.py against the same databases. The rules that keep that safe:
 
 - **Answer shapes are numbered (`SHAPES`), and cached answers carry theirs.** One with
-  another shape is a miss. Change an answer's shape: bump `SHAPES`.
+  another shape is a miss. Change an answer's shape: bump `SHAPES`. Each shape has its
+  own cache row (`<key>@<shape>`, e.g. `pipelines@2`), so two versions polling the same
+  thing don't keep overwriting each other's answer; dropping a key drops every shape.
 - **The schema only grows.** Migrations (`MIGRATIONS`, tracked in `PRAGMA user_version`)
   only add tables, columns and indexes, and every statement names its columns. An older
   forge.py then works on a database a newer one migrated.
@@ -231,15 +250,27 @@ several versions of forge.py against the same databases. The rules that keep tha
 ## What it writes where
 
 - `~/.local/share/herdr-forge/` (or `$HERDR_FORGE_HOME`, or `$XDG_DATA_HOME/herdr-forge`),
-  on each machine forge.py runs on:
+  on each machine forge.py runs on. The folder is made private (0700) and everything in
+  it is written readable by its owner only, since the caches hold issue text:
   - `forge-<version>.py`: one per version in use, removed after two weeks unused.
   - `forge.py`: the newest.
   - `<host>/<owner__project>.db`: the cache, including issue text and comments.
   - `<host>/backoff`: the rate-limit pause.
-  - `git.db`: commit times per checkout (velocity), pruned after 30 days unused.
+  - `git.db`: commit times per checkout (velocity), pruned after 30 days unused. `commits`
+    only takes branch-like refs (letters, digits, `_ . / -`, not starting with `-`) and
+    passes them after `--end-of-options` where the installed version supports it.
 - Cached answers nobody asked for in a week are deleted.
 - `~/.claude/skills/triage-issues/` only when the person clicks Install in Issues.
 - Removing everything: delete those folders.
+
+## Untrusted input
+
+Issue and request text, branch names, label and milestone names come from anyone who can
+open an issue or push a branch. `forge.py` refuses hosts and project paths that could
+leave its folder or read as options (a host is letters and digits with `.` or `-` inside;
+no path segment starts with `.` or `-`), and `context`/`show` hand agents cleaned,
+clearly marked text. Mods: put such text in its own `exec` argument, never in a shell
+script (see actions.md).
 
 ## Rules for the mods
 
