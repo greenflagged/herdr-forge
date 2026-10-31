@@ -177,7 +177,8 @@ export default class Milestones extends View {
         .child(div().flex_1().h(4).rounded(2).bg(t.raised).overflow_hidden()
           .child(div().h_full().w(`${m.pct}%`).rounded(2).bg(m.pct === 100 ? t.ansi2 : t.accent)))
         .child(div().w(150).flex_none().text_size(11).text_color(t.muted)
-          .child(`${m.closed}/${m.all} closed · ${m.open} open`)));
+          // Counts are null when forge.py ran out of time before fetching them.
+          .child(m.all == null ? "counts on the next refresh" : `${m.closed}/${m.all} closed · ${m.open} open`)));
     return open ? v_flex().child(row).child(this.workItems(m, t)) : row;
   }
 

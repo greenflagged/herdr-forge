@@ -20,8 +20,10 @@ fire a Herdr command, or open a mod of your own with the item.
 
 `props.actions` replaces the defaults. To keep them and add yours, put `"defaults"` in
 the list: `["defaults", { ... }]`. `forge-issues` has no defaults; `forge-requests` has
-**Ship** (an agent gets an older request merged) and **Resolve** (an agent rebases away
-conflicts).
+**Ship** (on a request open a day or more: an agent fixes what's outstanding, then waits for
+your go-ahead before merging) and **Resolve** (on a conflicted request: an agent rebases it and
+force-pushes the branch, without merging). Both ask before starting, work in a worktree of the
+request's branch, and don't show on requests from forks.
 
 ## What an action can do
 
