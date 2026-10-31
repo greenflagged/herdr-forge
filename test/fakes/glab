@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# A stand-in for glab: answers from $FAKE_GLAB/routes.json and logs each call.
-# routes: [[regex over the joined argv, {"out": json | text} | {"err": text} | {"sleep": s, ...}]];
+# A stand-in for glab and gh (fakes/gh links here): answers from $FAKE_GLAB/routes.json and logs each call.
+# routes: [[regex over the joined argv, {"out": json | text, "exit"?: n, "stderr"?: text} | {"err": text} | {"sleep": s, ...}]];
 # first match wins.
 import json, os, re, sys, time
 d = os.environ["FAKE_GLAB"]
 argv = " ".join(sys.argv[1:])
+if "--input -" in argv:  # a JSON body on stdin: logged after the argv
+    argv += " <<< " + sys.stdin.read()
 with open(os.path.join(d, "calls.log"), "a") as f:
     f.write(argv + "\n")
 for pattern, answer in json.load(open(os.path.join(d, "routes.json"))):
@@ -16,6 +18,8 @@ for pattern, answer in json.load(open(os.path.join(d, "routes.json"))):
             sys.exit(1)
         out = answer["out"]
         print(out if isinstance(out, str) else json.dumps(out))
-        sys.exit(0)
+        if answer.get("stderr"):
+            sys.stderr.write(answer["stderr"] + "\n")
+        sys.exit(answer.get("exit", 0))
 sys.stderr.write(f"no route for: {argv}\n")
 sys.exit(1)

@@ -3,13 +3,13 @@ import { v_flex, h_flex } from "gpui-base";
 import {
   exec, readTextFile, appHome, props, theme, shared, agents, terminals, run, spaces, knownAgents, openOverlay, notify,
 } from "herdr";
-import { forgeClient, projectOf, actionList, matches, runAction, describe, fill, ago, openUrl } from "./lib.js";
+import { forgeClient, projectOf, actionList, matches, runAction, describe, actionLabel, fill, ago, openUrl } from "./lib.js";
 import { Chrome, button, chip, note, pill, staleError } from "./ui.js";
-import { CI, defaultActions, checkoutOf, liveAgents, itemOf } from "./requests.js";
+import { CI, defaultActions, mergeTip, checkoutOf, liveAgents, itemOf } from "./requests.js";
 
 // Open merge requests (GitLab) / pull requests (GitHub) for one project, through forge.py.
 // props: { repo, on?, provider?, host?, folder?, actions? } (docs/contract.md, docs/actions.md)
-// forge.py runs on `on` (where glab is logged in); links open in this computer's browser.
+// forge.py runs on `on` (where glab or gh is logged in); links open in this computer's browser.
 
 const MOD = "forge-requests";
 const POLL = 60; // seconds
@@ -223,7 +223,7 @@ export default class ForgeRequests extends View {
         byTerminal ??= new Map(terminals().map((k) => [k.address, k]));
         return liveAgents(list, byAgent, byTerminal);
       };
-      // tone "danger" draws red (Resolve), primary the solid button color.
+      // tone "danger" draws red (Fix conflicts), primary the solid button color.
       const toneOf = (a) => a?.tone === "danger" ? "danger" : a?.primary ? "primary" : null;
       // The confirming action, looked up again (the list may have changed since).
       const actionById = (id) => actionList(p.actions, defaultActions(terms), shared(`${MOD}.actions`)).find((a) => a.id === id);
@@ -234,7 +234,7 @@ export default class ForgeRequests extends View {
         return h_flex().gap(6).items_center().text_size(11.5)
           .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(question))
           .child(button(t, `cancel-${r.iid}`, "Cancel", (cx) => { this.confirming = null; cx.notify(); }))
-          .child(button(t, `yes-${r.iid}`, c.id === "merge" ? "Merge" : a?.label ?? "OK", (cx) => {
+          .child(button(t, `yes-${r.iid}`, c.id === "merge" ? "Merge" : a ? actionLabel(a) : "OK", (cx) => {
             if (c.id === "merge") this.merge(r, cx);
             else if (a) this.act(a, r, cx);
             else { this.confirming = null; cx.notify(); }
@@ -263,14 +263,14 @@ export default class ForgeRequests extends View {
                 .tooltip(`Merge conflicts with ${r.target ?? "target"}`).child("⚠")))
               .when(Boolean(r.ci && CI[r.ci.status]), (e) => e.child(this.ciBadge(t, r, terms)))
               .when(Boolean(busy), (e) => e.child(div().flex_none().text_size(11).text_color(t.muted).child(busy)))
-              .children(shown.map((a) => button(t, `act-${r.iid}-${a.id}`, a.label, (cx) => {
+              .children(shown.map((a) => button(t, `act-${r.iid}-${a.id}`, actionLabel(a), (cx) => {
                 if (a.confirm) this.confirming = { iid: r.iid, id: a.id }; else { this.act(a, r, cx); return; }
                 cx.notify();
               }, { tone: toneOf(a), tooltip: describe(a) })))
               .when(mergeable, (e) => e.child(button(t, `merge-${r.iid}`, "Merge", (cx) => {
                 this.confirming = { iid: r.iid, id: "merge" };
                 cx.notify();
-              }, { tone: "primary", tooltip: `Merge into ${r.target ?? "target"}` }))))
+              }, { tone: "primary", tooltip: mergeTip(r, terms) }))))
             .when(this.confirming?.iid === r.iid, (e) => e.child(confirmRow(r)))
             .when(this.notice?.iid === r.iid, (e) => e.child(div().text_size(11)
               .text_color(this.notice.error ? t.ansi1 : t.muted).child(this.notice.text)))

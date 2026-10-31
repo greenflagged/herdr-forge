@@ -21,7 +21,8 @@ export const TERMS = {
 export function providerForHost(host, forges = {}) {
   if (!host) return null;
   if (forges[host]) return forges[host];
-  if (/(^|\.)github\.com$/.test(host)) return "github";
+  // github.com, and GitHub Enterprise hosts that say so (github.acme.com, acme-github.io)
+  if (/(^|[.-])github([.-]|$)/.test(host)) return "github";
   if (/(^|\.)(bitbucket\.org|codeberg\.org|sr\.ht)$/.test(host)) return null;
   return "gitlab";
 }
@@ -339,11 +340,21 @@ export function actionList(fromProps, defaults = [], registered = null, now = Da
 
 export function describe(a) {
   if (a.tooltip) return a.tooltip;
-  if (a.task != null || a.agent) return `Start ${a.agent ?? "claude"} in a new tab`;
+  if (isAgentAction(a)) return `Starts ${a.agent ?? "claude"} in a new tab`;
   if (a.exec) return `Run ${asList(a.exec)[0]}`;
   if (a.command) return `Run ${a.command}`;
   if (a.overlay) return `Open ${a.overlay.mod}`;
   return a.label;
+}
+
+// Agent actions (they start a tab with an agent) vs the rest, as runAction tells them apart.
+export const isAgentAction = (a) => a.task != null || Boolean(a.agent);
+
+// A button's text: ✦ marks every action that starts an agent, the defaults and yours alike,
+// so it's clear which buttons hand work to AI and which act at once.
+export const AGENT_MARK = "✦";
+export function actionLabel(a) {
+  return isAgentAction(a) ? `${AGENT_MARK} ${a.label}` : a.label;
 }
 
 // Where agents start for a project: props.folder, else a space on `on` whose folder is

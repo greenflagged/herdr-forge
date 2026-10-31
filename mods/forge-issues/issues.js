@@ -183,5 +183,4 @@ export function usesPriority(counts, metaLabels, sep) {
   return (metaLabels ?? []).some((l) => scopeOf(l.name, sep)[0] === "priority");
 }
 
-// Agent actions (the ones that start a tab) vs the rest, as lib.js runAction tells them apart.
-export const isAgentAction = (a) => a.task != null || Boolean(a.agent);
+export { isAgentAction } from "./lib.js";
