@@ -78,11 +78,15 @@ ${untrusted}
   ];
 }
 
-// The Merge button's tooltip: it merges at once, with no agent, and what happens while CI runs.
-export function mergeTip(r, terms) {
-  const running = terms.cli === "gh" ? "required checks are still running" : `the ${terms.ciRun} is still running`;
-  return `Merge into ${r.target ?? "the target branch"} now. No agent; asks first. If ${running}, turns on auto-merge instead.`;
+// The Merge button's tooltip: it merges at once, with no agent.
+export function mergeTip(r) {
+  return `Merge into ${r.target ?? "the target branch"} now. No agent; asks first.`;
 }
+
+// Whether the Merge button hides: while the request's CI is still running, or an agent on
+// it is still working (merging then would ship the branch out from under it). agents: agentsOf(r).
+export const mergeBlocked = (r, agents) => Boolean(CI[r?.ci?.status]?.[2])
+  || (agents ?? []).some((a) => a.status === "working");
 
 // Where agent actions start: props.folder, else a space on `on` whose folder is named
 // after the repo (…/shop, or a worktree-style …-shop).

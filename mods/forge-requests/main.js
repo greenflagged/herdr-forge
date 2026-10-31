@@ -6,7 +6,7 @@ import {
 import { forgeClient, projectOf, actionList, matches, runAction, describe, actionLabel, fill, ago, agoAt, openUrl } from "./lib.js";
 import { Chrome, button, chip, note, pill, staleError } from "./ui.js";
 import {
-  CI, defaultActions, mergeTip, checkoutOf, liveAgents, itemOf, agentPlaces, parseGitLook, ownersOf, withShared, askTarget, askText,
+  CI, defaultActions, mergeTip, mergeBlocked, checkoutOf, liveAgents, itemOf, agentPlaces, parseGitLook, ownersOf, withShared, askTarget, askText,
   GIT_LOOK, shownMerged, deployState, checkDue, cleanupPlan, cleanupLines, notDoneWhy, CLEAN_WORKTREE,
   WORKTREE_LIST, parseWorktrees, leftoversOf,
   orderFacts, migrationPattern, clashText,
@@ -355,7 +355,7 @@ export default class ForgeRequests extends View {
   }
 
   // Merge only the commit the list showed (its sha), so a later push isn't merged unseen.
-  // With CI still running, the forge sets auto-merge instead.
+  // The button hides while CI runs; if it started since the list loaded, the forge sets auto-merge.
   merge(r, cx) {
     const { provider, host, repo, on } = projectOf(props() ?? {});
     this.confirming = null;
@@ -649,7 +649,8 @@ export default class ForgeRequests extends View {
           const busy = this.busy[r.iid];
           const chips = this.orderChips(t, r, terms);
           const shown = hov === r ? hovActions : [];
-          const mergeable = hov === r && !busy && this.confirming?.iid !== r.iid && !r.draft && !r.conflicts;
+          const mergeable = hov === r && !busy && this.confirming?.iid !== r.iid && !r.draft && !r.conflicts
+            && !mergeBlocked(r, agentsOf(r));
           return v_flex().id(`rq-${r.iid}`).px(8).py(6).gap(3).rounded(6).cursor_pointer()
             .hover((s) => s.bg(t.hover))
             .on_hover((on, cx) => {
@@ -683,7 +684,7 @@ export default class ForgeRequests extends View {
               .when(mergeable, (e) => e.child(button(t, `merge-${r.iid}`, "Merge", (cx) => {
                 this.confirming = { iid: r.iid, id: "merge" };
                 cx.notify();
-              }, { tone: "primary", tooltip: mergeTip(r, terms) }))))
+              }, { tone: "primary", tooltip: mergeTip(r) }))))
             .when(this.confirming?.iid === r.iid, (e) => e.child(confirmRow(r)))
             .when(this.notice?.iid === r.iid, (e) => e.child(div().text_size(11)
               .text_color(this.notice.error ? t.ansi1 : t.muted).child(this.notice.text)))
