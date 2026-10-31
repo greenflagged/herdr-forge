@@ -58,20 +58,23 @@ export default class Toggle extends View {
     } else if (target) run("layout.toggle", { id: target });
   }
 
+  // Type and spacing as the panels' headers (Chrome in shared/ui.js): the arrow where
+  // their collapse caret is, the label as their title, the keys where their age goes.
   render() {
     const { target, tab, label, keys } = props() ?? {};
     const t = theme();
     if (!target && !tab) {
-      return h_flex().id("toggle").size_full().px(12).items_center().text_size(12).text_color(t.dim)
+      return h_flex().id("toggle").size_full().px(12).items_center().bg(t.background).text_size(11).text_color(t.muted)
         .child("No target set (props.target or props.tab).");
     }
     const open = (this.open = this.isOpen());
-    return h_flex().id(`toggle-${target ?? tab.name ?? tab.mod}`).size_full().px(12).gap(8).items_center().cursor_pointer()
-      .text_size(12).text_color(open ? t.foreground : t.muted)
+    return h_flex().id(`toggle-${target ?? tab.name ?? tab.mod}`).size_full().pl(6).pr(12).gap(6).items_center()
+      .bg(t.background).cursor_pointer().text_color(open ? t.foreground : t.muted)
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_click(() => this.click())
-      .child(div().child(tab ? "↗" : open ? "◂" : "▸"))
-      .child(div().flex_1().min_w(0).truncate().font_semibold().child(label ?? tab?.name ?? tab?.mod ?? target))
-      .when(Boolean(keys), (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child(keys)));
+      .child(div().w(12).flex_none().flex().justify_center().text_size(tab ? 11 : 9).text_color(t.dim)
+        .child(tab ? "↗" : open ? "◂" : "▸"))
+      .child(div().flex_1().min_w(0).truncate().text_size(13).font_semibold().child(label ?? tab?.name ?? tab?.mod ?? target))
+      .when(Boolean(keys), (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(keys)));
   }
 }
