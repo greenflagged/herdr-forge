@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+7e6f228dc515"
+VERSION = "0.1.0+418f8d276d86"
 
 import json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -220,7 +220,9 @@ class Cli:
         """Seconds to wait when an error is the forge's rate limit, else None."""
         return 120 if re.search(r"\b429\b.*(too many|rate)|too many requests", err, re.I) else None
 
-    def run(self, argv, stdin=None):
+    def run(self, argv, stdin=None, partial=False):
+        """partial: a failed call's stdout is still the answer when it holds GraphQL data
+        (gh exits 1 when any part of a query failed, e.g. one inaccessible cross-reference)."""
         self.p.check_backoff()
         try:
             r = subprocess.run([self.cli, *argv], capture_output=True, text=True, env=ENV, timeout=CLI_TIMEOUT,
@@ -234,6 +236,8 @@ class Cli:
             wait = self.retry_after(err)
             if wait:
                 self.p.backoff(wait)
+            elif partial and '"data"' in (r.stdout or ""):
+                return r.stdout
             raise RuntimeError(err[-500:])
         return r.stdout
 
@@ -274,12 +278,19 @@ class Cli:
         for k, v in (variables or {}).items():
             if v is not None:
                 argv += ["-F" if isinstance(v, int) else "-f", f"{k}={v}"]
-        out = self.json(self.run(argv))
-        if out.get("errors"):
-            raise RuntimeError(out["errors"][0].get("message", "GraphQL error"))
-        return out["data"]
+        out = self.json(self.run(argv, partial=True))
+        if not isinstance(out, dict):
+            raise RuntimeError("the GraphQL answer is empty")
+        data = out.get("data")
+        # Some fields failed but the rest came back: keep what came. Missing parts raise
+        # KeyError/TypeError where they're read, which keep the last good answer.
+        if out.get("errors") and not (isinstance(data, dict) and any(v is not None for v in data.values())):
+            raise RuntimeError((out["errors"][0] or {}).get("message") or "GraphQL error")
+        if not isinstance(data, dict):
+            raise RuntimeError("the GraphQL answer has no data")
+        return data
 
-    def may_stick(self, job):
+    def may_stick(self, job, runners):
         """Whether a pending job that none of the project's runners can take is stuck."""
         return True
 
@@ -556,7 +567,8 @@ class GitHub(Cli):
     def retry_after(err):
         if re.search(r"secondary rate limit|abuse detection", err, re.I):
             return 120
-        if re.search(r"rate limit exceeded|\b429\b", err, re.I):
+        # Not a bare 429: "Could not resolve to an Issue with the number of 429" isn't one.
+        if re.search(r"rate limit (already )?exceeded|RATE_LIMITED|HTTP 429", err, re.I):
             return 600  # the primary limit resets hourly; one failing call per 10 minutes
         return None
 
@@ -601,9 +613,11 @@ class GitHub(Cli):
     def merge(self, iid, sha):
         """Merges with the first method the repository allows (merge, squash, rebase). While
         required checks still run, turns on auto-merge instead, as glab does."""
-        repo = self.api(self.repo)
-        method = next((m for m, k in (("merge", "allow_merge_commit"), ("squash", "allow_squash_merge"),
-                                      ("rebase", "allow_rebase_merge")) if repo.get(k, m == "merge")), "merge")
+        # GraphQL: REST only shows the allowed methods to admins.
+        repo = self.repository("query($o:String!,$n:String!){repository(owner:$o,name:$n){"
+                               "mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed}}")
+        method = next((m for m, k in (("merge", "mergeCommitAllowed"), ("squash", "squashMergeAllowed"),
+                                      ("rebase", "rebaseMergeAllowed")) if repo.get(k)), "merge")
         body = {"merge_method": method, **({"sha": sha} if sha else {})}
         try:
             out = self.api(f"{self.repo}/pulls/{iid}/merge", "PUT", body=body)
@@ -655,12 +669,8 @@ class GitHub(Cli):
             self.api(f"{base}/cancel", "POST")
             return
         # Retry what failed, like GitLab; a run with nothing failed reruns whole.
-        try:
-            self.api(f"{base}/rerun-failed-jobs", "POST")
-        except Busy:
-            raise
-        except RuntimeError:
-            self.api(f"{base}/rerun", "POST")
+        failed = (self.api(base) or {}).get("conclusion") in ("failure", "cancelled", "timed_out", "startup_failure")
+        self.api(f"{base}/rerun-failed-jobs" if failed else f"{base}/rerun", "POST")
 
     @staticmethod
     def runner_info(r):
@@ -681,9 +691,11 @@ class GitHub(Cli):
         return self._labels.get(rid) or self.runner_info(self.api(f"{self.repo}/actions/runners/{rid}"))
 
     def ci_jobs(self):
-        runs = []
-        for status in ("in_progress", "queued"):
-            runs += self.api(f"{self.repo}/actions/runs?status={status}&per_page=20")["workflow_runs"]
+        runs = {}
+        for status in ("in_progress", "queued", "waiting"):
+            for r in self.api(f"{self.repo}/actions/runs?status={status}&per_page=20")["workflow_runs"]:
+                runs[r["id"]] = r  # a run that moved on between the calls is listed once
+        runs = list(runs.values())
 
         def jobs_of(r):
             if over_budget():
@@ -705,12 +717,15 @@ class GitHub(Cli):
                         "created_ms": ms(j.get("created_at") or j.get("started_at")),
                         "tags": [l.lower() for l in j.get("labels") or []],
                         "runner": {"id": j["runner_id"], "name": j.get("runner_name")} if j.get("runner_id") else None,
-                        "ref": ref, "pipeline": r["id"], "url": j["html_url"]})
+                        "ref": ref, "pipeline": r["id"], "url": j["html_url"],
+                        # Waiting for a deployment approval, not for a runner.
+                        "waiting": j.get("status") == "waiting"})
         return out
 
-    def may_stick(self, job):
-        # Jobs for GitHub's own runners (ubuntu-latest...) never need one of ours.
-        return "self-hosted" in job["tags"]
+    def may_stick(self, job, runners):
+        # Jobs for GitHub's own runners (ubuntu-latest...) never need one of ours. With no
+        # repository runners at all, the organisation's (which we can't list) may serve it.
+        return "self-hosted" in job["tags"] and not job.get("waiting") and bool(runners)
 
     # -- milestones --
 
@@ -1088,7 +1103,7 @@ class Project:
         for j in jobs:
             j["elsewhere"] = j["status"] == "running" and (j["runner"] or {}).get("id") not in own
             # Only when every runner's tags are known: don't cry wolf.
-            j["stuck"] = (j["status"] == "pending" and loaded and self.forge.may_stick(j)
+            j["stuck"] = (j["status"] == "pending" and loaded and self.forge.may_stick(j, runners)
                           and not any(can_run(r, j) for r in runners))
         return {"runners": runners, "jobs": jobs, "at": at, "error": err}
 
@@ -1480,8 +1495,9 @@ class Project:
                 more = True
                 break
             labels = json.loads(labels)
-            drop = [l for l in labels if l.startswith(f"priority{self.sep}") and l != want(prio)]
-            if want(prio) in labels and not drop:
+            # GitHub matches label names ignoring case: so do we.
+            drop = [l for l in labels if l.lower().startswith(f"priority{self.sep}".lower()) and l.lower() != want(prio).lower()]
+            if any(l.lower() == want(prio).lower() for l in labels) and not drop:
                 continue
             try:
                 self.update(iid, {"add_labels": [want(prio)], "remove_labels": drop})

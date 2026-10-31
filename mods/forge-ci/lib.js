@@ -21,7 +21,8 @@ export const TERMS = {
 export function providerForHost(host, forges = {}) {
   if (!host) return null;
   if (forges[host]) return forges[host];
-  if (/(^|\.)github\.com$/.test(host)) return "github";
+  // github.com, and GitHub Enterprise hosts that say so (github.acme.com, acme-github.io)
+  if (/(^|[.-])github([.-]|$)/.test(host)) return "github";
   if (/(^|\.)(bitbucket\.org|codeberg\.org|sr\.ht)$/.test(host)) return null;
   return "gitlab";
 }

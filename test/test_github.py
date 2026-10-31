@@ -101,7 +101,7 @@ class GitHub(unittest.TestCase):
 
     def test_merge_uses_a_method_the_repo_allows(self):
         self.routes([[r"-X PUT .*repos/acme/shop/pulls/7/merge", {"out": {"merged": True, "message": "Pull Request successfully merged"}}],
-                     [r"repos/acme/shop$", {"out": {"allow_merge_commit": False, "allow_squash_merge": True}}]])
+                     [r"mergeCommitAllowed", repo(mergeCommitAllowed=False, squashMergeAllowed=True, rebaseMergeAllowed=True)]])
         out = self.run_forge("merge", *P, 7, "sha7")
         self.assertEqual(out, {"ok": True, "text": "Pull Request successfully merged"})
         body = json.loads(self.calls()[-1].split(" <<< ")[1])
@@ -111,7 +111,7 @@ class GitHub(unittest.TestCase):
         self.routes([[r"-X PUT", {"err": 'gh: Required status check "build" is expected. (HTTP 405)'}],
                      [r"repos/acme/shop/pulls/7$", {"out": {"node_id": "PR_x"}}],
                      [r"enablePullRequestAutoMerge", {"out": {"data": {"enablePullRequestAutoMerge": {"clientMutationId": None}}}}],
-                     [r"repos/acme/shop$", {"out": {}}]])
+                     [r"mergeCommitAllowed", repo(mergeCommitAllowed=True)]])
         out = self.run_forge("merge", *P, 7, "sha7")
         self.assertEqual(out["text"], "Set to merge when checks pass")
         last = self.calls()[-1]
@@ -119,7 +119,7 @@ class GitHub(unittest.TestCase):
             self.assertIn(part, last)
 
     def test_merge_reports_other_refusals(self):
-        self.routes([[r"-X PUT", {"err": "gh: Pull Request is not mergeable (HTTP 405)"}], [r"repos/acme/shop$", {"out": {}}]])
+        self.routes([[r"-X PUT", {"err": "gh: Pull Request is not mergeable (HTTP 405)"}], [r"mergeCommitAllowed", repo(mergeCommitAllowed=True)]])
         self.assertIn("not mergeable", self.run_forge("merge", *P, 7, "sha7")["error"])
         self.assertFalse(any("enablePullRequestAutoMerge" in c for c in self.calls()))
 
@@ -140,11 +140,15 @@ class GitHub(unittest.TestCase):
         self.assertEqual((j2["status"], j2["duration"], j2["allow_failure"]), ("failed", 90.0, False))
 
     def test_retry_reruns_failed_jobs_else_the_whole_run(self):
-        self.routes([[r"-X POST repos/acme/shop/actions/runs/5/rerun-failed-jobs", {"out": ""}]])
+        self.routes([[r"-X POST repos/acme/shop/actions/runs/5/rerun-failed-jobs", {"out": ""}],
+                     [r"runs/5$", {"out": run(5, conclusion="failure")}]])
         self.assertTrue(self.run_forge("pipeline-act", *P, 5, "retry")["ok"])
-        self.routes([[r"rerun-failed-jobs", {"err": "gh: no failed jobs (HTTP 403)"}], [r"-X POST .*runs/5/rerun$", {"out": ""}]])
+        self.routes([[r"-X POST .*runs/5/rerun$", {"out": ""}], [r"runs/5$", {"out": run(5, conclusion="success")}]])
         self.assertTrue(self.run_forge("pipeline-act", *P, 5, "retry")["ok"])
-        self.assertTrue(self.calls()[-1].endswith("runs/5/rerun"))
+        self.assertTrue(self.calls()[-1].endswith("runs/5/rerun"), "nothing failed: the whole run")
+        self.routes([[r"rerun", {"err": "gh: Must have admin rights (HTTP 403)"}], [r"runs/5$", {"out": run(5, conclusion="failure")}]])
+        self.assertIn("admin", self.run_forge("pipeline-act", *P, 5, "retry")["error"])
+        self.assertFalse(self.calls()[-1].endswith("runs/5/rerun"), "a refusal isn't a reason to rerun everything")
         self.routes([[r"-X POST .*runs/5/cancel$", {"out": ""}]])
         self.assertTrue(self.run_forge("pipeline-act", *P, 5, "cancel")["ok"])
 
@@ -153,8 +157,10 @@ class GitHub(unittest.TestCase):
             [r"actions/runners\?", {"out": {"runners": [
                 {"id": 1, "name": "box", "os": "Linux", "status": "online", "labels": [{"name": "self-hosted"}, {"name": "Linux"}, {"name": "X64"}]}]}}],
             [r"runs\?status=in_progress", {"out": {"workflow_runs": [run(301, status="in_progress", conclusion=None)]}}],
-            [r"runs\?status=queued", {"out": {"workflow_runs": []}}],
+            [r"runs\?status=queued", {"out": {"workflow_runs": [run(301, status="in_progress", conclusion=None)]}}],
+            [r"runs\?status=waiting", {"out": {"workflow_runs": []}}],
             [r"runs/301/jobs", {"out": {"jobs": [
+                job(6, status="waiting", conclusion=None, labels=["self-hosted", "gpu"]),
                 job(1, status="in_progress", conclusion=None, runner_id=1, runner_name="box", labels=["self-hosted", "linux"]),
                 job(2, status="queued", conclusion=None, labels=["self-hosted", "gpu"]),
                 job(3, status="queued", conclusion=None, labels=["ubuntu-latest"]),
@@ -170,15 +176,27 @@ class GitHub(unittest.TestCase):
         self.assertTrue(jobs[2]["stuck"], "needs a gpu runner nobody has")
         self.assertFalse(jobs[3]["stuck"], "GitHub's own runners take it")
         self.assertTrue(jobs[4]["elsewhere"])
+        self.assertFalse(jobs[6]["stuck"], "waiting for an approval, not a runner")
+        self.assertEqual(len(out["jobs"]), 5, "a run listed twice gives its jobs once")
         self.assertFalse(any(c.endswith("actions/runners/1") for c in self.calls()), "details came with the list")
 
     def test_runners_without_admin_rights_flag_nothing_stuck(self):
         self.routes([[r"actions/runners", {"err": "gh: Resource not accessible by integration (HTTP 403)"}],
                      [r"runs\?status=in_progress", {"out": {"workflow_runs": []}}],
                      [r"runs\?status=queued", {"out": {"workflow_runs": [run(1, status="queued", conclusion=None)]}}],
+                     [r"runs\?status=waiting", {"out": {"workflow_runs": []}}],
                      [r"runs/1/jobs", {"out": {"jobs": [job(2, status="queued", conclusion=None, labels=["self-hosted"])]}}]])
         out = self.run_forge("runners", *P, 60, 0)
         self.assertIn("403", out["error"])
+        self.assertFalse(out["jobs"][0]["stuck"])
+
+    def test_org_runners_we_cant_list_dont_make_jobs_stuck(self):
+        self.routes([[r"actions/runners", {"out": {"runners": []}}],
+                     [r"runs\?status=queued", {"out": {"workflow_runs": [run(1, status="queued", conclusion=None)]}}],
+                     [r"runs\?status=", {"out": {"workflow_runs": []}}],
+                     [r"runs/1/jobs", {"out": {"jobs": [job(2, status="queued", conclusion=None, labels=["self-hosted"])]}}]])
+        out = self.run_forge("runners", *P, 60, 0)
+        self.assertIsNone(out["error"])
         self.assertFalse(out["jobs"][0]["stuck"])
 
     # -- milestones --
@@ -276,6 +294,30 @@ class GitHub(unittest.TestCase):
         n = len(self.calls())
         self.assertIn("rate-limited", self.run_forge("pipelines", "github", "github.com", "acme/other", 60, 0)["error"])
         self.assertEqual(len(self.calls()), n)
+
+    def test_issue_429_isnt_a_rate_limit(self):
+        self.routes([[r".", {"err": "gh: Could not resolve to an Issue with the number of 429."}]])
+        self.run_forge("pipelines", *P, 60, 0)
+        self.assertNotIn("rate-limited", self.run_forge("pipelines", *P, 60, 1)["error"])
+
+    def test_graphql_rate_limit_pauses_the_host(self):
+        self.routes([[r".", {"err": "gh: API rate limit already exceeded for user ID 1."}]])
+        self.run_forge("requests", *P, 60, 0)
+        self.assertIn("rate-limited", self.run_forge("requests", *P, 60, 1)["error"])
+
+    def test_partial_graphql_answers_keep_what_came(self):
+        # gh exits 1 when any field failed, with the data on stdout.
+        self.sync_issues([issue(1)])
+        p5 = {"number": 5, "title": "PR 5", "state": "OPEN", "isDraft": False, "headRefName": "b5",
+              "url": f"{URL}/pull/5", "repository": {"nameWithOwner": "acme/shop"}}
+        partial = {"data": {"repository": {"issue": {"closedByPullRequestsReferences": {"nodes": [p5]},
+                                                     "timelineItems": {"nodes": [{"source": None}]}}}},
+                   "errors": [{"type": "FORBIDDEN", "message": "Resource protected by organization SAML enforcement."}]}
+        self.routes([[r"issues/1/comments", {"out": []}],
+                     [r"timelineItems", {"out": json.dumps(partial), "exit": 1, "stderr": "gh: Resource protected by organization SAML enforcement."}]])
+        out = self.run_forge("show", *P, 1)
+        self.assertIsNone(out["error"])
+        self.assertEqual([r["iid"] for r in out["requests"]], [5])
 
     def test_repos_are_owner_and_name(self):
         self.assertIn("owner/name", self.run_forge("requests", "github", "github.com", "a/b/c", 60, 0)["error"])

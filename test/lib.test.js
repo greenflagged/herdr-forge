@@ -12,6 +12,10 @@ test("projectOf defaults to GitLab and infers the provider from the host", () =>
   assert.equal(providerForHost("codeberg.org"), null);
   assert.equal(projectOf({ host: "bitbucket.org" }).provider, null, "unsupported stays unsupported");
   assert.equal(providerForHost("git.acme.io", { "git.acme.io": "github" }), "github");
+  assert.equal(providerForHost("github.acme.com"), "github", "GitHub Enterprise that says so");
+  assert.equal(providerForHost("acme-github.io"), "github");
+  assert.equal(providerForHost("gitlab.acme.com"), "gitlab");
+  assert.equal(providerForHost("mygithubby.com"), "gitlab", "only github as a word");
 });
 
 test("parseRemote reads ssh, scp-style and https remotes", () => {

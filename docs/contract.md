@@ -160,28 +160,35 @@ mixes PRs into issues). Mods must cope with the nulls:
 - `repo` is `owner/name`; anything deeper is refused.
 - `Request.ci` is the PR head commit's rolled-up check status (`statusCheckRollup`); `id` null,
   `url` the PR's checks page, `updated_ms` the PR's. It comes with `requests` in one call.
-- `merge` picks the first allowed method (merge, squash, rebase) and passes `sha`. Refused for
+- `merge` picks the first allowed method (merge, squash, rebase; read through GraphQL, since
+  REST shows them only to admins) and passes `sha`. Refused for
   required status checks or a merge queue, it enables auto-merge instead (`text` says so).
 - `Pipeline` is one workflow run: `iid` the run number, `ref` the branch or `#<pr>` (a fork's PR
   run has no PR attached, so its branch), `name` the workflow. `Job.group` is the workflow name,
   `allow_failure` always false, `duration` null until the job completes. `retry` reruns the
-  failed jobs, or the whole run when there are none; `cancel` cancels the run.
-- `Runner`: self-hosted runners; listing them needs admin rights, and without them `runners`
+  failed jobs when the run failed, was cancelled or timed out, else the whole run; `cancel`
+  cancels the run.
+- `Runner`: the repository's own self-hosted runners (not the organisation's); listing them
+  needs admin rights, and without them `runners`
   answers that error (with `jobs` still filled). Details come with the list: `tags` are the
   runner's labels lowercased, `run_untagged` always true, `version` and `contacted_ms` null,
-  `platform` the OS, `arch` from the labels. `CiJob.tags` are the job's `runs-on` labels; a
-  pending job is `stuck` only when it asks for `self-hosted`, and nothing is stuck while the
-  runner list failed.
+  `platform` the OS, `arch` from the labels. `CiJob.tags` are the job's `runs-on` labels;
+  `waiting: true` marks a job waiting for a deployment approval. A pending job is `stuck` only
+  when it asks for `self-hosted`, isn't waiting, and the repository has runners; nothing is
+  stuck while the runner list failed.
 - `Milestone.id` is the milestone number (what `update`'s `milestone` takes); counts are issues
   only (GraphQL), so they come with the milestone and are never null.
 - `Issue.weight` and `blocking` are null; `requests` counts the PRs that close the issue.
   `show`'s requests are the closing PRs plus cross-referenced and connected ones, from this
   repository only. `LinkedRequest.state` is `opened`, `merged` or `closed`.
 - Velocity comes from search (`is:pr is:merged merged:>=...`), which stops at 1000 results.
+- GraphQL answers with some failed fields (an inaccessible cross-reference) keep what came
+  back; `gh` exits 1 for them, so `run` hands back their output.
 - Scoped labels: GitHub has none; the separator is a setting (`query`'s `sep`), default
   `": "` (`priority: high`). Accepting a triage proposal adds the label, which GitHub creates
   if it's missing.
-- Rate limits: the secondary limit pauses the host 2 minutes, the primary one 10.
+- Rate limits: the secondary limit pauses the host 2 minutes, the primary one (REST or
+  GraphQL) 10.
 
 ### Issue queries
 

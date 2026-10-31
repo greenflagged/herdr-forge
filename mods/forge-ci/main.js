@@ -132,7 +132,8 @@ export default class CI extends View {
     cx.notify();
     cx.spawn(async (cx) => {
       const verb = what === "retry" ? "Retry" : "Cancel";
-      const name = `${this.project.terms.ciRun} #${p.id}${p.ref ? ` · ${p.ref}` : ""}`;
+      // GitHub's run id is a long database id; people know runs by number.
+      const name = `${this.project.terms.ciRun} #${this.project.provider === "github" ? (p.iid ?? p.id) : p.id}${p.ref ? ` · ${p.ref}` : ""}`;
       let failed = null;
       try {
         const out = await this.call(["pipeline-act", p.id, what]);
