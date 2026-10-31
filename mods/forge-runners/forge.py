@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+9dae2a34b9c2"
+VERSION = "0.1.0+3b88cd9f3417"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -1564,7 +1564,10 @@ def end_of_options():
     return ["--end-of-options"] if m and (int(m[1]), int(m[2])) >= (2, 24) else []
 
 
-def commits(top, ref, rng, now_ms, tz, force):
+def commits(top, ref, rng, now_ms, tz, force, quick=False):
+    """Commit times on `ref`, bucketed. quick: answer from the cache without asking git (or,
+    with nothing cached, from a local git log, never a fetch), so a panel draws at once; the
+    panel then asks again normally, which fetches when the copy is 15 min old."""
     # The ref goes to git as an argument: a branch-like name only, never one that could
     # read as an option ("--output=...").
     if not re.fullmatch(r"([\w./][\w./-]*)?", ref):
@@ -1574,15 +1577,16 @@ def commits(top, ref, rng, now_ms, tz, force):
     row = db.execute("SELECT at, fetched, json FROM commits WHERE top=? AND ref=?", (top, ref)).fetchone()
     at, fetched, times = (row[0], row[1], json.loads(row[2])) if row else (0, 0, [])
     error = None
-    fetch = ref.startswith("origin/") and (force or now - fetched >= 900)
+    fetch = not quick and ref.startswith("origin/") and (force or now - fetched >= 900)
+    log = force or fetch or not row or (not quick and now - at >= 300)
     try:
-        eoo = end_of_options() if fetch or force or not row or now - at >= 300 else []
+        eoo = end_of_options() if fetch or log else []
         if fetch:
             fetched = now
             env = {**ENV, "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o ConnectTimeout=8"}
             subprocess.run(["git", "fetch", "-q", *eoo, "origin", ref[len("origin/"):]], cwd=top, env=env,
                            capture_output=True, timeout=CLI_TIMEOUT)
-        if force or fetch or not row or now - at >= 300:
+        if log:
             r = subprocess.run(["git", "log", "--since=85 days ago", "--no-merges", "--format=%ct", *eoo, ref or "HEAD"],
                                cwd=top, env=ENV, capture_output=True, text=True, timeout=CLI_TIMEOUT)
             if r.returncode == 0:
@@ -1597,7 +1601,7 @@ def commits(top, ref, rng, now_ms, tz, force):
     db.execute("DELETE FROM commits WHERE at < ? AND fetched < ?", (now - 30 * 86400, now - 30 * 86400))
     db.commit()
     b = buckets(rng, now_ms, tz)
-    return {"n": b[0], "size": b[1], "start": b[2], "edges": b[3], "at": at, "error": error,
+    return {"n": b[0], "size": b[1], "start": b[2], "edges": b[3], "at": at, "fetched": fetched, "error": error,
             "row": count_row("commits", times, b, now_ms), "total": len(times)}
 
 
@@ -1656,8 +1660,8 @@ def main(argv):
         return {"version": VERSION, "shapes": SHAPES}
     private_home()
     if cmd == "commits":
-        top, ref, rng, now_ms, tz, force = args
-        return commits(top, ref, rng, int(now_ms), tz, force == "1")
+        top, ref, rng, now_ms, tz, force, *quick = args
+        return commits(top, ref, rng, int(now_ms), tz, force == "1", quick[:1] == ["1"])
     if cmd == "skill":
         return skill(*args)
     provider, host, repo, *a = args
