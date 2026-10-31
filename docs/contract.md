@@ -104,7 +104,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `context P [chars]` | plain text: open issues for the triage agent |
 | `propose P <file.json>` | `{ok, issues, changes, skipped}` |
 | `accept-all P` | `{accepted, failed, more}` |
-| `skill <status\|install> <name> <text>` | `{installed, current, older, version, path}` |
+| `skill <status\|install> <name> <text> [replace]` | `{installed, current, older, foreign, version, path}`: `foreign` is a same-named skill that didn't come from herdr-forge; install leaves it alone unless given `replace` |
 | `version` | `{version, shapes}` |
 
 Writes (`merge`, `pipeline-act`, `update`, `comment`, triage ones) answer `{error}` instead

@@ -107,11 +107,24 @@ def median(xs):
 def connect(path, migrations):
     """Opens a database and brings it up to date. Migrations only ever add (tables,
     columns, indexes) and every statement names its columns, so an older forge.py keeps
-    working on a database a newer one migrated."""
+    working on a database a newer one migrated. Every panel may open a new database at
+    once on first start: switching it to WAL doesn't wait for a lock, so that retries."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    for attempt in range(30):
+        try:
+            return _connect(path, migrations)
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) and "busy" not in str(e):
+                raise
+            time.sleep(0.05 + random.random() * 0.15)
+    raise RuntimeError(f"{os.path.basename(path)} stayed busy")
+
+
+def _connect(path, migrations):
     db = sqlite3.connect(path, timeout=15, isolation_level=None)
     db.execute("PRAGMA busy_timeout=15000")
-    db.execute("PRAGMA journal_mode=WAL")
+    if db.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+        db.execute("PRAGMA journal_mode=WAL")
     if db.execute("PRAGMA user_version").fetchone()[0] < len(migrations):
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -601,7 +614,7 @@ class Project:
             row = self.db.execute("SELECT at, json FROM cache WHERE k=? AND shape=?", (f"runner:{r['id']}", SHAPES)).fetchone()
             if row:
                 details[r["id"]] = json.loads(row[1])
-            if max_age >= 0 and (not row or force or now - row[0] >= RUNNER_DETAILS_EVERY):
+            if not row or force or (max_age >= 0 and now - row[0] >= RUNNER_DETAILS_EVERY):
                 stale.append(r["id"])
 
         def fetch(rid):
@@ -653,7 +666,9 @@ class Project:
         newest time every earlier change is known to be fetched; a fetch cut short by the
         time budget keeps what it got and starts from there again next time."""
         err = None
-        if max_age >= 0 and (force or time.time() - self.meta("velocity_at", 0) >= max_age):
+        # max_age < 0 (stale-first) fetches only when nothing was ever fetched.
+        fetched = self.meta("velocity_at", 0)
+        if force or not fetched or (max_age >= 0 and time.time() - fetched >= max_age):
             started = int(time.time() * 1000)
             since = max(now_ms - KEEP, self.meta("velocity_through", 0) - 3600000)
             try:
@@ -1027,13 +1042,14 @@ def commits(top, ref, rng, now_ms, tz, force):
             "row": count_row("commits", times, b, now_ms), "total": len(times)}
 
 
-def skill(action, name, text):
-    """A Claude Code skill a mod ships. Its text carries `herdr-forge <version>`; install
-    never replaces a newer one, so mods of different versions don't fight over it."""
+def skill(action, name, text, replace=""):
+    """A Claude Code skill a mod ships. Its text carries `herdr-forge <version>`. Install
+    never replaces a newer one, so mods of different versions don't fight over it, and
+    never one that didn't come from herdr-forge (`foreign`) unless asked to (`replace`)."""
     if not re.fullmatch(r"[\w-]+", name):
         raise RuntimeError("bad skill name")
     dest = os.path.expanduser(f"~/.claude/skills/{name}/SKILL.md")
-    version = lambda t: (re.search(r"herdr-forge (\S+)", t or "") or [None, "0"])[1]
+    version = lambda t: (re.search(r"herdr-forge (\d+\.\d+\.\d+)", t or "") or [None, None])[1]
 
     def read():
         try:
@@ -1043,16 +1059,19 @@ def skill(action, name, text):
             return None
 
     current = read()
-    if action == "install" and (current is None or release(version(text)) >= release(version(current))):
+    foreign = current is not None and version(current) is None
+    if action == "install" and (current is None or (foreign and replace == "replace")
+                                or (not foreign and release(version(text)) >= release(version(current)))):
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         tmp = f"{dest}.{os.getpid()}"
         with open(tmp, "w") as f:
             f.write(text)
         os.replace(tmp, dest)
         current = read()
+    foreign = current is not None and version(current) is None
     return {"installed": current is not None, "current": current == text, "path": dest,
-            "version": version(current) if current else None,
-            "older": current is not None and release(version(current)) < release(version(text))}
+            "version": version(current) if current else None, "foreign": foreign,
+            "older": current is not None and not foreign and release(version(current)) < release(version(text))}
 
 
 def main(argv):

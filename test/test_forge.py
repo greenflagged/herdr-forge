@@ -76,6 +76,19 @@ class Forge(unittest.TestCase):
         self.run_forge("requests", *P, 60, 1)
         self.assertGreater(len(self.calls()), n, "force fetches again")
 
+    def test_every_panel_opening_a_new_database_at_once(self):
+        # Seen live: seven panels opening a new database together got "database is locked".
+        self.routes([[r".", {"out": []}]])
+        cmds = ["pipelines", "requests", "milestones", "runners"]
+        for round_ in range(4):
+            env = {"HOME": os.path.join(self.home, f"h{round_}"), "PATH": "/usr/bin:/bin",
+                   "HERDR_FORGE_BIN": FAKES, "FAKE_GLAB": self.fake}
+            procs = [subprocess.Popen([sys.executable, "-I", SCRIPT, cmds[k % 4], *P, "60", "0"],
+                                      stdout=subprocess.PIPE, text=True, env=env) for k in range(16)]
+            for pr in procs:
+                out = json.loads(pr.communicate()[0])
+                self.assertNotIn("locked", str(out.get("error")), out)
+
     def test_stale_conflict_flag_is_ignored_while_checking(self):
         self.routes([[r"merge_requests", {"out": [mr(7, has_conflicts=True, detailed_merge_status="checking")]}],
                      [r"pipelines", {"out": []}]])
@@ -209,6 +222,15 @@ class Forge(unittest.TestCase):
         n = len(self.calls())
         self.run_forge("velocity", *P, 900, 0, "30d", NOW, 0)
         self.assertEqual(len(self.calls()), n, "changing the range recomputes from the cache")
+        self.run_forge("velocity", *P, -1, 0, "30d", NOW, 0)
+        self.assertEqual(len(self.calls()), n, "stale-first with data: no fetch")
+
+    def test_stale_first_fetches_what_was_never_fetched(self):
+        page = lambda nodes: {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}
+        self.routes([[r"mergeRequests", {"out": {"data": {"project": {"mergeRequests": page([{"iid": "1", "mergedAt": iso(NOW - 1000), "createdAt": iso(NOW - 5000)}])}}}}],
+                     [r"issues\(state:closed", {"out": {"data": {"project": {"issues": page([])}}}}]])
+        out = self.run_forge("velocity", *P, -1, 0, "12w", NOW, 0)
+        self.assertEqual(sum(out["rows"][0]["values"]), 1, "seen live: an empty cache stayed empty")
 
     def test_commits(self):
         repo = os.path.join(self.home, "repo")
@@ -321,6 +343,17 @@ class Forge(unittest.TestCase):
         self.assertTrue(out["installed"] and out["current"])
         self.assertFalse(self.run_forge("skill", "status", "triage-issues", "y")["current"])
         self.assertIn("bad skill name", self.run_forge("skill", "install", "../x", "y")["error"])
+
+    def test_skill_install_leaves_someone_elses_skill_alone(self):
+        os.makedirs(os.path.join(self.home, ".claude/skills/triage-issues"))
+        with open(os.path.join(self.home, ".claude/skills/triage-issues/SKILL.md"), "w") as f:
+            f.write("mine")
+        ours = "<!-- herdr-forge 0.1.0 -->"
+        out = self.run_forge("skill", "install", "triage-issues", ours)
+        self.assertTrue(out["foreign"] and not out["current"], "not replaced without asking")
+        out = self.run_forge("skill", "install", "triage-issues", ours, "replace")
+        self.assertTrue(out["current"] and not out["foreign"])
+        self.assertFalse(self.run_forge("skill", "install", "triage-issues", "<!-- herdr-forge 0.0.9 -->")["current"], "no downgrade")
 
 
 if __name__ == "__main__":

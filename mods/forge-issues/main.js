@@ -464,7 +464,8 @@ export default class Issues extends View {
       try {
         const text = await readTextFile(`${appHome()}/mods/${MOD}/skills/triage-issues/SKILL.md`);
         if (!text) throw new Error("SKILL.md is missing from the mod");
-        const out = await this.forge(["skill", install ? "install" : "status", "triage-issues", text], { on: this.project().on });
+        const replace = install && skillLine(this.skill).replace ? ["replace"] : [];
+        const out = await this.forge(["skill", install ? "install" : "status", "triage-issues", text, ...replace], { on: this.project().on });
         this.skill = out.error ? { error: out.error } : out;
       } catch (e) {
         this.skill = { error: msg(e) };
@@ -541,10 +542,19 @@ export default class Issues extends View {
       .child(div().text_size(11).text_color(t.dim).child(last
         ? `Last run ${since(last.at * 1000)}: ${last.issues} ranked, ${proposed} change${proposed === 1 ? "" : "s"} waiting`
         : "Not run yet."))
-      .child(h_flex().gap(6).items_center()
-        .child(div().flex_1().min_w(0).text_size(11).text_color(this.skill?.error ? t.ansi1 : t.dim).child(skill.text))
-        .when(Boolean(skill.install) && !this.skillBusy, (e) => e.child(btn("skill-install", skill.install, (cx) => this.checkSkill(cx, true))))
-        .when(Boolean(this.skillBusy), (e) => e.child(div().text_size(11).text_color(t.muted).child("Installing…"))))
+      // The text on its own line: beside a button it was squeezed to a word per line.
+      .child(div().text_size(11).text_color(this.skill?.error ? t.ansi1 : t.dim).child(skill.text))
+      .when(Boolean(skill.install) && !this.skillBusy && !this.confirmSkill, (e) => e.child(h_flex()
+        .child(btn("skill-install", skill.install, (cx) => {
+          // Replacing someone else's skill asks first.
+          if (skill.replace) { this.confirmSkill = true; cx.notify(); } else this.checkSkill(cx, true);
+        }))))
+      .when(Boolean(this.confirmSkill), (e) => e.child(v_flex().gap(4)
+        .child(div().text_size(11).text_color(t.foreground).child("Replace it with this package's triage-issues skill?"))
+        .child(h_flex().gap(6)
+          .child(btn("skill-no", "Cancel", (cx) => { this.confirmSkill = false; cx.notify(); }))
+          .child(btn("skill-yes", "Replace", (cx) => { this.confirmSkill = false; this.checkSkill(cx, true); }, true)))))
+      .when(Boolean(this.skillBusy), (e) => e.child(div().text_size(11).text_color(t.muted).child("Installing…")))
       .child(h_flex().gap(6).flex_wrap()
         .child(btn("retriage", open ? "Go to triage" : last ? "Re-triage" : "Triage", (cx) => this.retriage(cx), !proposed))
         .when(proposed > 0 && !this.confirmAll && !this.accepting, (e) => e.child(btn("accept-all", `Accept all ${proposed}`, (cx) => { this.confirmAll = true; cx.notify(); }, true)))

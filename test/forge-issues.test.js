@@ -94,6 +94,7 @@ test("skillLine offers Install only when missing or older", () => {
   assert.equal(skillLine({ installed: true, older: false, current: true }).install, null);
   assert.equal(skillLine({ installed: true, older: false, current: false, version: "0.2.0" }).install, null, "never downgrade");
   assert.equal(skillLine({ error: "boom" }).install, null);
+  assert.deepEqual(skillLine({ installed: true, foreign: true }).replace, true, "someone else's skill: replace, with a question");
   assert.equal(skillLine(null).install, null);
 });
 

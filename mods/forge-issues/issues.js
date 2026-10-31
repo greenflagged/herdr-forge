@@ -149,7 +149,8 @@ export function skillLine(s) {
   if (!s) return { text: "Checking the triage skill…", install: null };
   if (s.error) return { text: `Skill: ${s.error}`, install: null };
   if (!s.installed) return { text: "The triage-issues skill isn't installed.", install: "Install skill" };
-  if (s.older) return { text: `The triage-issues skill is older (${s.version}).`, install: "Update skill" };
+  if (s.foreign) return { text: "Another triage-issues skill is installed (not this package's).", install: "Replace skill", replace: true };
+  if (s.older) return { text: `The installed triage-issues skill is from ${s.version}.`, install: "Update skill" };
   return { text: s.current ? "Skill installed." : `Skill ${s.version ?? ""} installed.`.replace("  ", " "), install: null };
 }
 
