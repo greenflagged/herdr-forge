@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+93ff2e1982b8"
+VERSION = "0.1.0+9e8d2cc7e018"
 
 import json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -280,7 +280,7 @@ class GitLab:
     def pipelines(self):
         return [{
             "id": p["id"], "iid": p.get("iid"), "ref": ref_label(p.get("ref")), "sha": p.get("sha"),
-            "status": p["status"], "source": "MR" if p.get("source") == "merge_request_event" else (p.get("source") or ""),
+            "status": p["status"], "source": "request" if p.get("source") == "merge_request_event" else (p.get("source") or ""),
             "updated_ms": ms(p.get("updated_at")), "url": p["web_url"],
         } for p in self.api(f"{self.project}/pipelines?per_page=20")]
 
@@ -624,6 +624,9 @@ class Project:
             r["details"] = d is not None
             loaded = loaded and r["details"]
             r.update(d or {})
+        # Online first, then by name; queued jobs oldest first.
+        runners.sort(key=lambda r: (r.get("status") != "online", (r.get("name") or "").lower()))
+        jobs.sort(key=lambda j: (j["status"] != "running", j.get("created_ms") or 0))
         own = {r["id"] for r in runners}
         for r in runners:
             r["running"] = [j["id"] for j in jobs if j["status"] == "running" and (j["runner"] or {}).get("id") == r["id"]]
@@ -835,8 +838,13 @@ class Project:
             proposed = t[1] if i[3].get("triage") == "proposed change" else None
             # [iid, title, state, priority, type, requests, updated_ms, proposed priority, agent launched]
             page.append([i[0], i[1], i[2], i[8].get("priority"), i[8].get("type"), i[7], i[6], proposed, i[0] in launched])
-        scopes = sorted((g[6:] for g in counts if g.startswith("scope:")),
-                        key=lambda s: -sum(v for k, v in counts[f"scope:{s}"].items() if k != "(none)"))
+        # Every scope the project's issues use, in any state: a scope only closed issues use
+        # still belongs in the detail pane's pickers.
+        used = {}
+        for (labels,) in self.db.execute("SELECT labels FROM issues"):
+            for k in scoped_of(json.loads(labels), self.sep):
+                used[k] = used.get(k, 0) + 1
+        scopes = sorted(used, key=lambda s: -used[s])
         return {"rows": page, "offset": offset, "matched": len(rows), "total": len(base), "counts": counts,
                 "scopes": scopes, "sep": self.sep}
 

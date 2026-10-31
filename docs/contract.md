@@ -132,7 +132,7 @@ Note       {author, body, at_ms}
 LinkedRequest {iid, title, state, draft, source, url}
 ```
 
-`iid` is the number people see (`#12`, `!7`). CI statuses use GitLab's words on every
+`iid` is the number people see (`#12`, `!7`; issues are `#` on every forge). CI statuses use GitLab's words on every
 forge: `created`, `waiting_for_resource`, `preparing`, `pending`, `running`, `success`,
 `failed`, `canceled`, `skipped`, `manual`, `scheduled`.
 
@@ -163,7 +163,7 @@ the nulls now:
 - `counts`: `{group: {value: n}}` for the sidebar. Groups: `scope:<name>` for every scoped
   label in use (`priority::high` is group `scope:priority`, value `high`), `milestone`,
   `triage`, `labels` (unscoped ones). `(none)` counts issues without a value.
-- `scopes`: scope names in use, most used first.
+- `scopes`: scope names the project's issues use, in any state, most used first.
 - `sep`: the scoped-label separator (`::` on GitLab). Passing `sep` changes and remembers it.
 - `picked` uses the same group names; values within a group are OR, groups are AND.
 
@@ -193,7 +193,7 @@ Mods talk through Herdr's `shared(key)` / `setShared(key, value)`:
 | `forge-requests.actions` | any mod | `{owner: {at, actions: [Action]}}`: extra buttons on requests |
 | `forge-issues.actions` | any mod | `{owner: {at, actions: [Action]}}`: extra buttons on issues |
 | `forge-issues.selected` | `forge-issues` | the open issue's action fields (`issueItem`), or null |
-| `forge-issues.event` | `forge-issues` | `{type, iid, repo, host, at}` after each change it writes |
+| `forge-issues.event` | `forge-issues` | `{type, iid, repo, host, at}` after each change it writes; `type: "action"` adds `action` (its id); a change to many issues at once (accept-all) has `iid: null` and `iids` |
 
 Setting shared state redraws every mod: write only on real changes.
 

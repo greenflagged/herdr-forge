@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+a41fc54d98f5"
+VERSION = "0.1.0+9e8d2cc7e018"
 
 import json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -838,8 +838,13 @@ class Project:
             proposed = t[1] if i[3].get("triage") == "proposed change" else None
             # [iid, title, state, priority, type, requests, updated_ms, proposed priority, agent launched]
             page.append([i[0], i[1], i[2], i[8].get("priority"), i[8].get("type"), i[7], i[6], proposed, i[0] in launched])
-        scopes = sorted((g[6:] for g in counts if g.startswith("scope:")),
-                        key=lambda s: -sum(v for k, v in counts[f"scope:{s}"].items() if k != "(none)"))
+        # Every scope the project's issues use, in any state: a scope only closed issues use
+        # still belongs in the detail pane's pickers.
+        used = {}
+        for (labels,) in self.db.execute("SELECT labels FROM issues"):
+            for k in scoped_of(json.loads(labels), self.sep):
+                used[k] = used.get(k, 0) + 1
+        scopes = sorted(used, key=lambda s: -used[s])
         return {"rows": page, "offset": offset, "matched": len(rows), "total": len(base), "counts": counts,
                 "scopes": scopes, "sep": self.sep}
 

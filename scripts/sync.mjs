@@ -18,6 +18,16 @@ export function expected() {
   const hash = createHash("sha256").update(py).digest("hex").slice(0, 12);
   const stamped = py.replace(/^VERSION = "[^"]*"/m, `VERSION = "${rel}+${hash}"`);
   const out = new Map();
+  // Shipped skills say which release they came from, so installs never downgrade them.
+  for (const mod of readdirSync(join(root, "mods")).filter((m) => m.startsWith("forge-"))) {
+    const skills = join(root, "mods", mod, "skills");
+    if (!existsSync(skills)) continue;
+    for (const name of readdirSync(skills)) {
+      const path = join("mods", mod, "skills", name, "SKILL.md");
+      if (!existsSync(join(root, path))) continue;
+      out.set(path, readFileSync(join(root, path), "utf8").replace(/herdr-forge \d+\.\d+\.\d+/, `herdr-forge ${rel}`));
+    }
+  }
   for (const mod of readdirSync(join(root, "mods")).filter((m) => m.startsWith("forge-")).sort()) {
     out.set(join("mods", mod, "lib.js"), lib);
     if (!NO_FORGE.has(mod)) out.set(join("mods", mod, "forge.py"), stamped);
