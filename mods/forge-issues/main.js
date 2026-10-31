@@ -101,7 +101,6 @@ export default class Issues extends View {
     this.input.on("change", () => { this.typedAt = Date.now(); this.pendingQuery = this.input.value().trim(); });
     this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx?.notify(); });
     this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx?.notify(); });
-    if (this.query) this.input.set_value(this.query);
     this.comment = TextareaState.new({ placeholder: `Comment (written to ${terms.name})`, rows: 3 });
 
     // Stale first: what SQLite has now, then a sync with the forge.
