@@ -27,11 +27,12 @@ export function providerForHost(host, forges = {}) {
 }
 
 // { provider, host, repo, on, terms } from a mod's props. provider defaults from host,
-// host from provider; with neither it's GitLab on gitlab.com.
+// host from provider; with neither it's GitLab on gitlab.com. provider is null for a
+// host we don't support (Bitbucket, Codeberg): mods say so instead of calling it.
 export function projectOf(p = {}) {
-  const provider = p.provider ?? (p.host ? providerForHost(p.host, p.forges) : null) ?? "gitlab";
+  const provider = p.provider ?? (p.host ? providerForHost(p.host, p.forges) : "gitlab");
   const terms = TERMS[provider] ?? TERMS.gitlab;
-  return { provider, host: p.host ?? terms.host, repo: p.repo ?? "", on: p.on ?? null, terms };
+  return { provider: TERMS[provider] ? provider : null, host: p.host ?? terms.host, repo: p.repo ?? "", on: p.on ?? null, terms };
 }
 
 // git@host:group/proj.git, https://host/group/proj.git, ssh://git@host:22/group/proj
@@ -43,28 +44,44 @@ export function parseRemote(url) {
 
 // ---- running forge.py ----
 
+// POSIX machines only (macOS, Linux): the script goes over as one argument.
 const PYTHONS = ["python3", "/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"];
-const DIR = "~/.local/share/herdr-forge";
+// The same folder forge.py uses: $HERDR_FORGE_HOME, else $XDG_DATA_HOME/herdr-forge.
+const DIR = `d=os.environ.get("HERDR_FORGE_HOME") or os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"),"herdr-forge")`;
 
-// Runs the installed copy of this exact version, or says it isn't there.
+// Runs the installed copy of this exact version, or says it isn't there. Touching it
+// marks it used, so cleanup only removes versions nothing runs.
 const boot = (ver) => `import os,sys
-p=os.path.expanduser("${DIR}/forge-${ver}.py")
+${DIR}
+p=os.path.join(d,"forge-${ver}.py")
 if not os.path.exists(p):
     print('{"install": true}'); sys.exit(0)
+try: os.utime(p)
+except OSError: pass
 sys.argv=[p]+sys.argv[1:]
 exec(compile(open(p).read(),p,"exec"),{"__name__":"__main__","__file__":p})`;
 
-// Writes forge-<version>.py (what boot runs) and forge.py (a stable path for agents and
-// skills), and clears versions untouched for a week.
-const INSTALL = `import os,sys,glob,time
-d=os.path.expanduser("${DIR}"); os.makedirs(d,exist_ok=True)
+// Writes forge-<version>.py (what boot runs), and forge.py (the stable path agents and
+// skills call) unless a newer release is already there; removes versions unused for two
+// weeks. Every mod may install at once on first start: each writes its own temp file.
+const INSTALL = `import os,sys,glob,time,re
+${DIR}
+os.makedirs(d,exist_ok=True)
 v,t=sys.argv[1],sys.argv[2]
-for n in ("forge-%s.py"%v,"forge.py"):
-    f=os.path.join(d,n)
-    with open(f+".tmp","w") as o: o.write(t)
-    os.replace(f+".tmp",f)
+rel=lambda s:tuple(int(x) for x in re.findall(r"\\d+",s.split("+")[0]))
+def put(n):
+    f=os.path.join(d,n); tmp="%s.%d"%(f,os.getpid())
+    with open(tmp,"w") as o: o.write(t)
+    os.replace(tmp,f)
+put("forge-%s.py"%v)
+try:
+    with open(os.path.join(d,"forge.py")) as o: old=re.search(r'^VERSION = "([^"]+)"',o.read(),re.M).group(1)
+except Exception: old="0"
+if rel(v)>=rel(old): put("forge.py")
 for f in glob.glob(os.path.join(d,"forge-*.py")):
-    if not f.endswith("forge-%s.py"%v) and time.time()-os.path.getmtime(f)>7*86400: os.remove(f)
+    try:
+        if not f.endswith("forge-%s.py"%v) and time.time()-os.path.getmtime(f)>14*86400: os.remove(f)
+    except OSError: pass
 print('{"ok": true}')`;
 
 export function versionOf(text) {
@@ -150,11 +167,27 @@ export function openUrl(exec, url) {
 
 // ---- layout ----
 
-// Whether a block showing this mod (with these props, where given) is on screen: not
-// hidden, not under a hidden node, not an inactive child of a stack. Herdr keeps hidden
-// mods running, so polling mods check this. A mod that isn't in the layout tree at all
-// (a tab pane, an overlay) counts as shown.
-export function isShown(tree, mod, match = {}) {
+// Whether a copy of this mod (with these props, where given) is on screen. Herdr keeps
+// hidden mods running, so polling mods check this before fetching.
+// - A layout block: not hidden, not under a hidden node, not an inactive stack child.
+// - A mod pane (a tab opened with { mod }): its tab is the shown tab of the shown space.
+//   Pass live = { panes: panes(), spaces: spaces() } for this.
+// - Neither (an overlay, a layout still loading): shown, so it fails safe.
+// It answers for any copy, not this one: Herdr doesn't tell a block its own id, so two
+// copies with the same props poll while either is shown. A minimized window counts as
+// shown; check window().active to slow down.
+export function isShown(tree, mod, match = {}, live = {}) {
+  const inTree = shownInTree(tree, mod, match);
+  if (inTree != null) return inTree;
+  const panes = (live.panes ?? []).filter((p) => p.mod === mod);
+  if (!panes.length) return true;
+  const showing = new Set();
+  for (const s of live.spaces ?? []) if (s.active) for (const t of s.tabs ?? []) if (t.active) showing.add(t.id);
+  return panes.some((p) => showing.has(p.tab));
+}
+
+// true / false for a block in the layout tree; null when the mod has no block there.
+function shownInTree(tree, mod, match) {
   let found = false, shown = false;
   const walk = (n, hidden) => {
     if (!n || typeof n !== "object") return;
@@ -170,7 +203,7 @@ export function isShown(tree, mod, match = {}) {
     for (const f of Array.isArray(n.floating) ? n.floating : []) walk(f, h);
   };
   walk(tree, false);
-  return !found || shown;
+  return found ? shown : null;
 }
 
 // ---- actions: buttons people add to issues and requests ----
@@ -182,7 +215,45 @@ export function isShown(tree, mod, match = {}) {
 //   overlay: { overlay: { mod, kind?, width?, height?, props? } }   open your own mod with the item
 // Strings in task, tab, folder, exec, cwd, args and overlay.props fill {placeholders}
 // from the item (docs/actions.md lists them). exec never goes through a shell: put
-// placeholders in their own arguments, not inside an `sh -c` script.
+// placeholders in their own arguments, not inside an `sh -c` script. A placeholder that
+// is a whole argument may not fill in something starting with "-" (it would read as an
+// option): runAction refuses it.
+
+// The fields an action sees for a request or an issue (see docs/actions.md).
+export function requestItem(r, project) {
+  return {
+    kind: "request", iid: r.iid, ref: `${project.terms.reqPrefix}${r.iid}`, title: r.title, url: r.url,
+    repo: project.repo, host: project.host, provider: project.provider, author: r.author ?? null,
+    labels: r.labels ?? [], created_ms: r.created_ms ?? null, source: r.source ?? null, target: r.target ?? null,
+    sha: r.sha ?? null, draft: Boolean(r.draft), conflicts: Boolean(r.conflicts), ci_status: r.ci?.status ?? null,
+  };
+}
+
+export function issueItem(i, project, sep = "::") {
+  const scoped = {};
+  for (const l of i.labels ?? []) {
+    const k = l.lastIndexOf(sep);
+    if (k > 0) scoped[l.slice(0, k)] = l.slice(k + sep.length);
+  }
+  return {
+    kind: "issue", iid: i.iid, ref: `#${i.iid}`, title: i.title, url: i.url,
+    repo: project.repo, host: project.host, provider: project.provider, author: i.author ?? null,
+    labels: i.labels ?? [], created_ms: i.created_ms ?? null, state: i.state, assignees: i.assignees ?? [],
+    milestone: i.milestone?.title ?? null, scoped,
+  };
+}
+
+// The folder with a request's branch checked out, on `on`: its worktree if it has one,
+// else a new one next to Herdr's (~/.herdr/worktrees/<repo>/<branch>). Runs in the main
+// checkout with the branch as $1; prints the folder.
+export const WORKTREE = `b="$1"
+wt=$(git worktree list --porcelain | awk -v ref="refs/heads/$b" '/^worktree /{w=substr($0,10)} $0=="branch "ref{print w; exit}')
+if [ -z "$wt" ]; then
+  git fetch -q origin "$b" || exit 1
+  wt="$HOME/.herdr/worktrees/$(basename "$PWD")/$(printf %s "$b" | tr / -)"
+  git worktree add -q "$wt" "$b" >&2 || exit 1
+fi
+printf %s "$wt"`;
 
 export function fill(v, ctx) {
   if (typeof v === "string") {
@@ -211,12 +282,19 @@ export function matches(when, ctx, now = Date.now()) {
   return true;
 }
 
+// Registered actions older than this are dropped: a mod that registers refreshes its
+// entry (re-registers) at least every half hour, so an uninstalled or crashed one's
+// buttons go away by themselves.
+export const REGISTRATION_TTL = 3600000;
+
 // The actions a mod shows: props.actions (null: the mod's defaults; "defaults" inside
 // it: the defaults there), then ones other mods registered in shared state
-// ({ owner: [actions] }). The first action with an id wins.
-export function actionList(fromProps, defaults = [], registered = null) {
+// ({ owner: { at, actions } }). The first action with an id wins.
+export function actionList(fromProps, defaults = [], registered = null, now = Date.now()) {
   const base = fromProps == null ? defaults : asList(fromProps).flatMap((a) => (a === "defaults" ? defaults : [a]));
-  const extra = registered && typeof registered === "object" ? Object.values(registered).flatMap(asList) : [];
+  const extra = registered && typeof registered === "object"
+    ? Object.values(registered).filter((r) => r && now - (r.at ?? 0) < REGISTRATION_TTL).flatMap((r) => asList(r.actions ?? []))
+    : [];
   const seen = new Set(), out = [];
   for (const a of [...base, ...extra]) {
     if (!a || typeof a !== "object" || !a.id || !a.label || seen.has(a.id)) continue;
@@ -235,14 +313,31 @@ export function describe(a) {
   return a.label;
 }
 
+// Fills a list of arguments, refusing a whole-argument placeholder that turns into an option.
+function fillArgs(list, ctx) {
+  return asList(list).map((t) => {
+    const v = fill(t, ctx);
+    if (typeof t === "string" && /^\{[\w.]+\}$/.test(t) && typeof v === "string" && v.startsWith("-")) {
+      throw new Error(`Refusing ${t} = "${v}": it would read as an option.`);
+    }
+    return v;
+  });
+}
+
 // Runs one action for one item. env: { on, folder } from the mod's props (folder: the
-// checkout agents start in; a worktree for some request actions). h: Herdr's
-// { exec, run, spaces, knownAgents, openOverlay }. Resolves with { text?, tab? }.
+// checkout agents start in). h: Herdr's { exec, run, spaces, knownAgents, openOverlay }.
+// Resolves with { text?, tab? }.
 export async function runAction(a, ctx, env, h) {
   const on = env.on ?? null;
   if (a.task != null || a.agent) {
-    const folder = fill(a.folder, ctx) ?? env.folder;
+    let folder = fill(a.folder, ctx) ?? env.folder;
     if (!folder) throw new Error("No checkout set (props.folder).");
+    if (a.worktree) {
+      if (!ctx.source || ctx.source.startsWith("-")) throw new Error("No branch to check out.");
+      const r = await h.exec("sh", ["-c", WORKTREE, "sh", ctx.source], { cwd: folder, on });
+      if (r.code !== 0 || !r.stdout.trim()) throw new Error(r.stderr.trim() || `Couldn't check out ${ctx.source}`);
+      folder = r.stdout.trim();
+    }
     const key = a.agent ?? "claude";
     const agent = (await h.knownAgents({ on })).find((x) => x.key === key && x.installed);
     if (!agent) throw new Error(`${key} isn't installed on ${on ?? "this computer"}.`);
@@ -254,7 +349,7 @@ export async function runAction(a, ctx, env, h) {
     return { tab, text: `Started ${agent.name ?? key} in "${tab}"` };
   }
   if (a.exec) {
-    const [cmd, ...args] = fill(asList(a.exec), ctx);
+    const [cmd, ...args] = fillArgs(a.exec, ctx);
     const cwd = fill(a.cwd, ctx) ?? env.folder ?? undefined;
     const r = await h.exec(cmd, args, { on: a.local ? null : on, ...(cwd && !a.local ? { cwd } : {}) });
     const last = (s) => (s ?? "").trim().split("\n").filter(Boolean).pop();

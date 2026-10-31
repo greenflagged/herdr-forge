@@ -55,10 +55,14 @@ Strings in `task`, `tab`, `folder`, `exec`, `cwd`, `args` and `overlay.props` fi
 |---|---|---|
 | `iid`, `ref` (`#12`, `!7`), `title`, `url`, `repo`, `host`, `provider`, `author`, `labels`, `created_ms` | `state`, `assignees`, `milestone` (title), `scoped` (`{priority: "high", type: "bug"}`) | `source`, `target`, `sha`, `draft`, `conflicts`, `ci_status` |
 
-Titles come from whoever wrote the issue. `exec` never runs through a shell, so a title
-can't inject a command, as long as placeholders are their own arguments. Don't write
-`["sh", "-c", "echo {title}"]`; write `["sh", "-c", "echo \"$1\"", "sh", "{title}"]`.
-An agent `task` hands the title to the agent as text: treat it like any untrusted input.
+Titles and branch names come from whoever wrote them. `exec` never runs through a shell,
+so they can't inject a command, as long as placeholders are their own arguments:
+
+- Don't write `["sh", "-c", "echo {title}"]`; write `["sh", "-c", "echo \"$1\"", "sh", "{title}"]`.
+- A placeholder that is a whole argument and fills in something starting with `-` is
+  refused, since the program would read it as an option. Where the program allows it, put
+  `--` before such arguments anyway: `["git", "switch", "--", "{source}"]`.
+- An agent `task` hands the title to the agent as text: treat it like any untrusted input.
 
 ## From another mod, at run time
 
@@ -67,14 +71,19 @@ or only for some repos:
 
 ```js
 import { shared, setShared } from "herdr";
-setShared("forge-issues.actions", {
+const register = () => setShared("forge-issues.actions", {
   ...(shared("forge-issues.actions") ?? {}),
-  "my-mod": [{ id: "my-mod.log-time", label: "Log time", overlay: { mod: "my-mod" } }],
+  "my-mod": { at: Date.now(), actions: [{ id: "my-mod.log-time", label: "Log time", overlay: { mod: "my-mod" } }] },
 });
+// in init(): register now and every 30 minutes
+register();
+cx.timer.every(30 * 60000, () => register());
 ```
 
-Key the object by your mod's name so mods don't overwrite each other, and set your entry
-to `[]` to take your buttons away. Requests use `forge-requests.actions`.
+Key the object by your mod's name so mods don't overwrite each other. An entry older than
+an hour is ignored, so the buttons of a mod that stopped or was removed go away by
+themselves; set `actions: []` to take yours away at once. Requests use
+`forge-requests.actions`.
 
 ## Reacting to the issue browser
 

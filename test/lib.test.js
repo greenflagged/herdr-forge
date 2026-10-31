@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  actionList, ago, clock, fill, forgeClient, isShown, matches, parseRemote, projectOf, providerForHost, runAction, span, versionOf,
+  actionList, ago, clock, fill, forgeClient, isShown, issueItem, matches, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf,
 } from "../shared/lib.js";
 
 test("projectOf defaults to GitLab and infers the provider from the host", () => {
@@ -10,6 +10,7 @@ test("projectOf defaults to GitLab and infers the provider from the host", () =>
   assert.equal(projectOf({ host: "git.acme.io" }).provider, "gitlab");
   assert.equal(projectOf({ provider: "github" }).terms.request, "PR");
   assert.equal(providerForHost("codeberg.org"), null);
+  assert.equal(projectOf({ host: "bitbucket.org" }).provider, null, "unsupported stays unsupported");
   assert.equal(providerForHost("git.acme.io", { "git.acme.io": "github" }), "github");
 });
 
@@ -51,8 +52,14 @@ test("actionList merges props, defaults and registered actions", () => {
   const defaults = [{ id: "ship", label: "Ship" }];
   assert.deepEqual(actionList(null, defaults).map((a) => a.id), ["ship"]);
   assert.deepEqual(actionList([{ id: "x", label: "X" }], defaults).map((a) => a.id), ["x"]);
-  const reg = { other: [{ id: "y", label: "Y" }, { id: "x", label: "dup" }], broken: "nope" };
-  assert.deepEqual(actionList(["defaults", { id: "x", label: "X" }, { label: "no id" }], defaults, reg).map((a) => a.id), ["ship", "x", "y"]);
+  const now = 10_000_000;
+  const reg = {
+    other: { at: now - 60000, actions: [{ id: "y", label: "Y" }, { id: "x", label: "dup" }] },
+    gone: { at: now - 2 * 3600000, actions: [{ id: "old", label: "Old" }] },
+    broken: "nope",
+  };
+  assert.deepEqual(actionList(["defaults", { id: "x", label: "X" }, { label: "no id" }], defaults, reg, now).map((a) => a.id),
+    ["ship", "x", "y"], "stale registrations drop out");
 });
 
 test("isShown follows hidden ancestors, stacks and missing blocks", () => {
@@ -65,8 +72,13 @@ test("isShown follows hidden ancestors, stacks and missing blocks", () => {
   assert.equal(isShown(tree, "forge-ci"), false);
   assert.equal(isShown(tree, "forge-runners"), false);
   assert.equal(isShown(tree, "forge-milestones"), true);
-  assert.equal(isShown(tree, "forge-issues"), true, "not in the layout: a tab pane");
+  assert.equal(isShown(tree, "forge-issues"), true, "nowhere: fails safe");
   assert.equal(isShown(tree, "forge-ci", { repo: "x/y" }), true, "no block for that repo");
+  const spaces = [{ id: "s1", active: true, tabs: [{ id: "t1", active: false }, { id: "t2", active: true }] },
+    { id: "s2", active: false, tabs: [{ id: "t3", active: true }] }];
+  assert.equal(isShown(tree, "forge-issues", {}, { panes: [{ mod: "forge-issues", tab: "t1" }], spaces }), false, "a background tab");
+  assert.equal(isShown(tree, "forge-issues", {}, { panes: [{ mod: "forge-issues", tab: "t3" }], spaces }), false, "another space's tab");
+  assert.equal(isShown(tree, "forge-issues", {}, { panes: [{ mod: "forge-issues", tab: "t2" }], spaces }), true);
 });
 
 function fakeHerdr() {
@@ -95,7 +107,32 @@ test("runAction runs programs without a shell, and reports their last line", asy
   assert.equal(out.text, "ok done");
   assert.deepEqual(h.calls[0], ["exec", "git", ["switch", "-c", "i-3"], { on: "mac", cwd: "/src/shop" }]);
   await assert.rejects(runAction({ id: "z", label: "Z" }, {}, {}, h), /nothing to do/);
+  await assert.rejects(runAction({ id: "g", label: "G", exec: ["git", "switch", "{source}"] }, { source: "--orphan=x" }, {}, h),
+    /read as an option/);
+  await runAction({ id: "g", label: "G", exec: ["echo", "branch {source}"] }, { source: "-x" }, {}, h); // inside a longer argument: fine
   await assert.rejects(runAction({ id: "t", label: "T", task: "x" }, {}, {}, h), /No checkout/);
+});
+
+test("runAction starts worktree actions in the request's checkout", async () => {
+  const h = fakeHerdr();
+  h.exec = async (cmd, args, opts) => { h.calls.push(["exec", cmd, args, opts]); return { code: 0, stdout: "/wt/shop/feat-x", stderr: "" }; };
+  h.spaces = () => [];
+  await runAction({ id: "ship", label: "Ship", worktree: true, task: "merge {ref}", tab: "ship {ref}" },
+    { ref: "!3", source: "feat/x" }, { on: "mac", folder: "/src/shop" }, h);
+  assert.equal(h.calls[0][2].at(-1), "feat/x");
+  assert.deepEqual(h.calls[1], ["run", "space.new", { folder: "/wt/shop/feat-x", machine: "mac", tab: "ship !3", argv: ["claude"], task: "merge !3" }]);
+  await assert.rejects(runAction({ id: "s", label: "S", worktree: true, task: "x" }, { source: "-x" }, { folder: "/f" }, h), /No branch/);
+});
+
+test("item builders give actions their fields", () => {
+  const project = projectOf({ repo: "acme/shop" });
+  const r = requestItem({ iid: 3, title: "T", url: "u", source: "b", ci: { status: "failed" }, labels: [] }, project);
+  assert.equal(r.ref, "!3");
+  assert.equal(r.ci_status, "failed");
+  const i = issueItem({ iid: 4, title: "T", labels: ["priority::high", "bug"], milestone: { title: "M1" }, state: "opened" }, project);
+  assert.deepEqual(i.scoped, { priority: "high" });
+  assert.equal(i.milestone, "M1");
+  assert.equal(fill("{scoped.priority} {ref}", i), "high #4");
 });
 
 test("runAction opens overlays with the item", async () => {
@@ -126,15 +163,40 @@ test("forgeClient installs the script once, then runs the installed copy", async
 
 test("forgeClient's boot and install code runs under real python", async () => {
   const { execFile } = await import("node:child_process");
-  const { mkdtempSync, readFileSync, existsSync } = await import("node:fs");
+  const { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const home = mkdtempSync(`${tmpdir()}/forge-`);
-  const script = readFileSync(new URL("../shared/forge.py", import.meta.url), "utf8").replace(/^VERSION = "dev"/m, 'VERSION = "t1"');
+  const source = readFileSync(new URL("../shared/forge.py", import.meta.url), "utf8");
+  const as = (v) => source.replace(/^VERSION = "[^"]*"/m, `VERSION = "${v}"`);
   const exec = (bin, args) => new Promise((resolve, reject) => execFile(bin, args, { env: { HOME: home, PATH: process.env.PATH } },
     (err, stdout, stderr) => (err && err.code === "ENOENT" ? reject(err) : resolve({ code: err?.code ?? 0, stdout, stderr }))));
-  const forge = forgeClient({ exec, readTextFile: async () => script }, "/x/forge.py");
-  assert.deepEqual(await forge(["version"]), { version: "t1" });
-  assert.ok(existsSync(`${home}/.local/share/herdr-forge/forge-t1.py`));
-  assert.ok(existsSync(`${home}/.local/share/herdr-forge/forge.py`), "a stable path for agents");
-  assert.match((await forge(["nope", "gitlab", "gitlab.com", "a/b"])).error, /unknown command/);
+  const dir = `${home}/.local/share/herdr-forge`;
+
+  // Every mod installs at once on first start: none may fail.
+  const clients = Array.from({ length: 8 }, () => forgeClient({ exec, readTextFile: async () => as("0.2.0+aa") }, "/x"));
+  const answers = await Promise.all(clients.map((f) => f(["version"])));
+  assert.ok(answers.every((a) => a.version === "0.2.0+aa"), JSON.stringify(answers));
+  assert.ok(existsSync(`${dir}/forge-0.2.0+aa.py`));
+  assert.match(readFileSync(`${dir}/forge.py`, "utf8"), /VERSION = "0.2.0\+aa"/, "a stable path for agents");
+
+  // An older mod installing later doesn't take the stable path back.
+  const old = forgeClient({ exec, readTextFile: async () => as("0.1.0+bb") }, "/x");
+  assert.equal((await old(["version"])).version, "0.1.0+bb");
+  assert.match(readFileSync(`${dir}/forge.py`, "utf8"), /VERSION = "0.2.0\+aa"/);
+  assert.match((await old(["nope", "gitlab", "gitlab.com", "a/b"])).error, /unknown command/);
+
+  // $HERDR_FORGE_HOME moves everything.
+  const elsewhere = `${home}/elsewhere`;
+  mkdirSync(elsewhere);
+  const exec2 = (bin, args) => new Promise((resolve) => execFile(bin, args, { env: { HOME: home, PATH: process.env.PATH, HERDR_FORGE_HOME: elsewhere } },
+    (err, stdout, stderr) => resolve({ code: err?.code ?? 0, stdout, stderr })));
+  await forgeClient({ exec: exec2, readTextFile: async () => as("0.2.0+aa") }, "/x")(["version"]);
+  assert.ok(existsSync(`${elsewhere}/forge-0.2.0+aa.py`));
+  writeFileSync(`${home}/unused`, "");
+});
+
+test("forge.py stays small enough to send as one argument", async () => {
+  const { statSync } = await import("node:fs");
+  // Linux caps one argument at 128 KiB; past 100 KB, compress it or send it in parts.
+  assert.ok(statSync(new URL("../shared/forge.py", import.meta.url)).size < 100_000);
 });

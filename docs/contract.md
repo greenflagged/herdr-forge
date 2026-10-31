@@ -17,7 +17,9 @@ any of them; the README covers using the mods.
 
 Every mod folder holds `main.js`, `mod.json`, `lib.js` and (except `forge-toggle`)
 `forge.py`. `lib.js` and `forge.py` are copies of `shared/`; never edit the copies.
-`npm run sync` writes them, and `npm test` fails when one is out of date.
+`npm run sync` writes them (stamping forge.py's `VERSION` as `<package version>+<hash>`),
+and `npm test` fails when one is out of date. Machines that run forge.py must be POSIX
+(macOS, Linux) with `python3`.
 
 ## Props every forge mod takes
 
@@ -30,7 +32,8 @@ Every mod folder holds `main.js`, `mod.json`, `lib.js` and (except `forge-toggle
 - `on`: the Herdr machine where `glab`/`gh` is logged in and `forge.py` runs. Omitted or
   null: this computer.
 - `provider`: `gitlab` (default) or `github` (not built yet: `forge.py` answers with an
-  error). Inferred from `host` when missing.
+  error). Inferred from `host` when missing. `projectOf` gives `provider: null` for a host
+  we don't support (Bitbucket, Codeberg): say so on screen instead of calling forge.py.
 - `host`: defaults to `gitlab.com` / `github.com`. Self-hosted GitLab: set it.
 - `folder`: the project's checkout on `on`, where agent actions start. `forge-requests`
   and `forge-issues` only.
@@ -55,13 +58,23 @@ const { provider, host, repo, on } = projectOf(props());
 const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ? 1 : 0], { on });
 ```
 
-- Every command prints one JSON object. `forgeClient` returns it, including when it has
-  `error`: the cached answer is still there (stale), so show the data and the error.
-  It throws only when python can't run or the output isn't JSON.
+- Every command prints one JSON object, and every read's answer always has its data key
+  (`pipelines: []` on a first failure). `forgeClient` returns it, including when it has
+  `error`: with a cached answer, the data is the last good one, so show the data and the
+  error. It throws only when python can't run or the output isn't JSON.
 - `nocli: true` with the error: the forge's CLI isn't installed on that machine.
 - Times are epoch milliseconds (`*_ms`) everywhere; never `Date.parse` in a render.
-- Reads take `maxAge` (seconds) and `force` (1: fetch now). The answer's `at` is when it
-  was fetched (epoch seconds). Pass the refresh interval as `maxAge` and force only on ↻.
+- **Reads take `maxAge` (seconds) and `force`.** The answer's `at` is when it was fetched
+  (epoch seconds, 0: never).
+  - **First read after `init`: `maxAge` `-1`.** Any cached answer comes back at once,
+    however old, so the panel draws instantly after a restart; only a missing one is
+    fetched. Then poll with the refresh interval as `maxAge`.
+  - **↻: `force` 1.**
+- While one process fetches an answer, others asking for it get the last one (a 30 s
+  lease), so panels in several windows don't fetch the same thing together.
+- **One call must finish within Herdr's 30 s limit, so `forge.py` stops work at ~18 s.**
+  `sync` and `accept-all` then answer `more: true`: call again soon. Velocity carries
+  on from where it stopped on its next fetch.
 
 ### Commands
 
@@ -79,17 +92,23 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `milestone-items P <title> <maxAge> <force>` | `{items: [MilestoneItem], at, error}` |
 | `velocity P <maxAge> <force> <12w\|30d> <nowMs> <tzOffsetMin>` | `{n, size, start, at, error, rows: [Row]}` with row keys `merged`, `closed`, `cycle` |
 | `commits <top> <ref> <12w\|30d> <nowMs> <tzOffsetMin> <force>` | `{n, size, start, at, error, row: Row, total}`: run on the repo's machine |
-| `sync P <since> <force>` | `{now, last_sync, error, changed, triage_at, triage_run}` |
+| `sync P <since> <force>` | `{now, last_sync, error, changed, more, triage_at, triage_run}` |
 | `meta P` | `{labels: [{name, color, description}], milestones: [{id, title, due}], sep}` |
 | `query P <json>` | `{rows, offset, matched, total, counts, scopes, sep}` (below) |
-| `show P <iid>` | `{iid, issue: Issue, description, notes, requests, launches, triage, error}` |
+| `search P <text>` | `{iids}`: full-text matches, best first |
+| `show P <iid>` | `{iid, issue: Issue, description, notes: [Note], requests: [LinkedRequest], launches, triage, error}` |
 | `update P <iid> <json>` | `{issue: Issue}`; json: `{add_labels?: [], remove_labels?: [], milestone?: id\|null, state?: "opened"\|"closed"}` |
 | `comment P <iid> <body>` | same as `show` |
 | `launch P <iid> <actionId> <tab>` | `{ok}`: records that an action started an agent |
 | `triage P <iid> accepted\|dismissed`, `lock P <iid> 0\|1` | `{ok}` |
 | `context P [chars]` | plain text: open issues for the triage agent |
-| `propose P <file.json>`, `accept-all P` | triage results in, accepted priorities out |
-| `skill <status\|install> <name> <text>` | `{installed, current, path}`: a Claude Code skill in `~/.claude/skills/<name>/` |
+| `propose P <file.json>` | `{ok, issues, changes, skipped}` |
+| `accept-all P` | `{accepted, failed, more}` |
+| `skill <status\|install> <name> <text>` | `{installed, current, older, version, path}` |
+| `version` | `{version, shapes}` |
+
+Writes drop the cached answers they change: `merge` drops requests, CI and velocity;
+`pipeline-act` drops CI and runners' jobs; `update` drops milestones and velocity.
 
 ### Shapes
 
@@ -98,8 +117,8 @@ Request    {iid, title, url, draft, auto_merge, conflicts, source, target, sha, 
             labels[], created_ms, updated_ms, ci: {id, status, url, updated_ms} | null}
 Pipeline   {id, iid, ref, sha, status, source, updated_ms, url}      ref: "main" or "!811"
 Job        {id, name, group, status, duration, allow_failure, url}    group: stage / workflow
-Runner     {id, name, status, paused, url, details, tags[], run_untagged, version, platform,
-            arch, contacted_ms, running: [jobId]}                     details: tags etc. loaded
+Runner     {id, name, status, paused, url, details, running: [jobId],
+            tags[], run_untagged, version, platform, arch, contacted_ms}   last six: when details
 CiJob      {id, name, group, status, started_ms, created_ms, tags[], runner: {id, name} | null,
             ref, pipeline, url, elsewhere, stuck}
 Milestone  {id, title, due, url, open, closed, all}                  due: "YYYY-MM-DD" | null
@@ -107,14 +126,31 @@ MilestoneItem {id, iid, title, state, assignees[], url}              open ones f
 Row        {key, values: [n per bucket], now, avg, unit?: "duration", lowerBetter?}
 Issue      {iid, title, state, labels[], milestone: {id, title, due} | null, assignees[], author,
             created_ms, updated_ms, closed_ms, notes, requests, weight, blocking, url}
+Note       {author, body, at_ms}
+LinkedRequest {iid, title, state, draft, source, url}
 ```
 
-CI statuses use GitLab's words on every forge: `created`, `waiting_for_resource`,
-`preparing`, `pending`, `running`, `success`, `failed`, `canceled`, `skipped`, `manual`,
-`scheduled`.
+`iid` is the number people see (`#12`, `!7`). CI statuses use GitLab's words on every
+forge: `created`, `waiting_for_resource`, `preparing`, `pending`, `running`, `success`,
+`failed`, `canceled`, `skipped`, `manual`, `scheduled`.
 
 Velocity buckets: bucket `i` covers `[start + i*size, start + (i+1)*size)`. `now` is the
 last 7 days, `avg` the average week over 12 weeks (for `duration` rows, medians in ms).
+
+### What the shapes will mean on GitHub
+
+Not built yet; these are the decisions the shapes already allow, so mods must cope with
+the nulls now:
+
+- `Request.ci` is the PR head commit's combined check status (all workflows rolled up);
+  `id` null, `url` the checks page.
+- `Pipeline` is one workflow run; `ref` is the branch or `#<pr>`; `iid` the run number.
+  `Job.group` is the run's workflow name (the same for every job in a run).
+- `Runner` needs admin rights on GitHub: without them, `runners` answers an error and
+  the panel says so. `run_untagged` is always true, `tags` are runner labels.
+- `Milestone` counts come with the milestone. `Issue.weight` and `blocking` are null.
+- Scoped labels: GitHub has none; the separator is a setting (`query`'s `sep`), default
+  `": "` (`priority: high`).
 
 ### Issue queries
 
@@ -133,11 +169,15 @@ last 7 days, `avg` the average week over 12 weeks (for `duration` rows, medians 
 
 - `projectOf(props)`, `TERMS`, `providerForHost(host, forges)`, `parseRemote(url)`.
 - `forgeClient(h, scriptPath)`: above.
-- `isShown(layout(), MOD, { repo })`: whether a block showing this mod is on screen. Herdr
-  keeps hidden mods running: every polling mod checks this before fetching. A mod that
-  isn't in the layout tree (a tab pane) counts as shown.
+- `isShown(layout(), MOD, { repo }, { panes: panes(), spaces: spaces() })`: whether a copy
+  of this mod is on screen: a layout block that isn't hidden, or a mod pane in the shown
+  tab. Herdr keeps hidden mods running, so every polling mod checks this before fetching.
+  It answers for any copy with those props (Herdr doesn't tell a block its own id), and
+  fails safe (true) when it can't tell.
+- `requestItem(request, project)`, `issueItem(issue, project, sep)`: the fields actions see.
 - `ago(ms)`, `clock(seconds)`, `span(ms)`, `num(x, digits)`, `openUrl(exec, url)`.
-- Actions: `fill`, `matches`, `actionList`, `describe`, `runAction`. See actions.md.
+- Actions: `fill`, `matches`, `actionList`, `describe`, `runAction`, `WORKTREE`. See
+  actions.md.
 
 ## Shared state
 
@@ -146,12 +186,56 @@ Mods talk through Herdr's `shared(key)` / `setShared(key, value)`:
 | Key | Written by | Value |
 |---|---|---|
 | `forge.requestAgents` | any mod (e.g. an agents list) | `{requestUrl: [{address, name}]}`: agents working on a request; `forge-requests` and `forge-issues` show them |
-| `forge-requests.actions` | any mod | `{owner: [Action]}`: extra buttons on requests |
-| `forge-issues.actions` | any mod | `{owner: [Action]}`: extra buttons on issues |
-| `forge-issues.selected` | `forge-issues` | the open issue's action context, or null |
-| `forge-issues.event` | `forge-issues` | `{type, iid, repo, host, at, ...}` after each change it writes |
+| `forge-requests.actions` | any mod | `{owner: {at, actions: [Action]}}`: extra buttons on requests |
+| `forge-issues.actions` | any mod | `{owner: {at, actions: [Action]}}`: extra buttons on issues |
+| `forge-issues.selected` | `forge-issues` | the open issue's action fields (`issueItem`), or null |
+| `forge-issues.event` | `forge-issues` | `{type, iid, repo, host, at}` after each change it writes |
 
 Setting shared state redraws every mod: write only on real changes.
+
+## Stable for agents and other packages
+
+Agents, skills and other people's mods will call these, so they only ever gain things:
+
+- **forge.py, through the stable path** `~/.local/share/herdr-forge/forge.py` (the
+  newest release installed): `version`, `sync`, `query`, `search`, `show`, `context`,
+  `propose`, `accept-all`. Their arguments keep their order. New options come as new
+  commands or `--name=value` flags at the end, never new positional slots.
+- **Shared-state keys and their values** above: fields are only added, and readers ignore
+  fields they don't know.
+- **Action fields** (actions.md) and **props** names.
+
+Internal, and free to change between releases: every other forge.py command (each mod
+runs its own pinned `forge-<version>.py`), the SQLite schema, `lib.js`.
+
+## Mixed versions
+
+Herdr doesn't update mods, and people copy them one at a time, so one machine runs
+several versions of forge.py against the same databases. The rules that keep that safe:
+
+- **Answer shapes are numbered (`SHAPES`), and cached answers carry theirs.** One with
+  another shape is a miss. Change an answer's shape: bump `SHAPES`.
+- **The schema only grows.** Migrations (`MIGRATIONS`, tracked in `PRAGMA user_version`)
+  only add tables, columns and indexes, and every statement names its columns. An older
+  forge.py then works on a database a newer one migrated.
+- **Rebuildable tables** can be dropped and fetched again if a change ever needs it:
+  `cache`, `issues`, `issues_fts`, `details`, `merged`, `closed`. **The person's own
+  state** needs real migrations: `triage`, `launches`, `meta`.
+- **Installs never downgrade shared things.** The stable `forge.py` and shipped skills are
+  only replaced by the same or a newer release.
+
+## What it writes where
+
+- `~/.local/share/herdr-forge/` (or `$HERDR_FORGE_HOME`, or `$XDG_DATA_HOME/herdr-forge`),
+  on each machine forge.py runs on:
+  - `forge-<version>.py`: one per version in use, removed after two weeks unused.
+  - `forge.py`: the newest.
+  - `<host>/<owner__project>.db`: the cache, including issue text and comments.
+  - `<host>/backoff`: the rate-limit pause.
+  - `git.db`: commit times per checkout (velocity), pruned after 30 days unused.
+- Cached answers nobody asked for in a week are deleted.
+- `~/.claude/skills/triage-issues/` only when the person clicks Install in Issues.
+- Removing everything: delete those folders.
 
 ## Rules for the mods
 

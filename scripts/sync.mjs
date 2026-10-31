@@ -1,6 +1,6 @@
 // Copies shared/lib.js into every mods/forge-* folder, and shared/forge.py into every
-// one that talks to a forge, stamping forge.py's VERSION with a hash of its contents
-// (mods install each version once per machine). `--check` only reports copies that
+// one that talks to a forge, stamping forge.py's VERSION with package.json's version and
+// a hash of its contents (mods install each version once per machine). `--check` only reports copies that
 // differ, for the tests and CI.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -13,8 +13,10 @@ const NO_FORGE = new Set(["forge-toggle"]); // layout glue: never calls forge.py
 export function expected() {
   const lib = readFileSync(join(root, "shared/lib.js"), "utf8");
   const py = readFileSync(join(root, "shared/forge.py"), "utf8");
-  const version = createHash("sha256").update(py).digest("hex").slice(0, 12);
-  const stamped = py.replace(/^VERSION = "[^"]*"/m, `VERSION = "${version}"`);
+  // <release>+<hash>: the release orders versions, the hash tells builds apart.
+  const { version: rel } = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const hash = createHash("sha256").update(py).digest("hex").slice(0, 12);
+  const stamped = py.replace(/^VERSION = "[^"]*"/m, `VERSION = "${rel}+${hash}"`);
   const out = new Map();
   for (const mod of readdirSync(join(root, "mods")).filter((m) => m.startsWith("forge-")).sort()) {
     out.set(join("mods", mod, "lib.js"), lib);

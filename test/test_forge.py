@@ -48,8 +48,8 @@ class Forge(unittest.TestCase):
         except FileNotFoundError:
             return []
 
-    def run_forge(self, *args, text=False):
-        env = {"HOME": self.home, "PATH": "/usr/bin:/bin", "HERDR_FORGE_BIN": FAKES, "FAKE_GLAB": self.fake}
+    def run_forge(self, *args, text=False, **extra):
+        env = {"HOME": self.home, "PATH": "/usr/bin:/bin", "HERDR_FORGE_BIN": FAKES, "FAKE_GLAB": self.fake, **extra}
         r = subprocess.run([sys.executable, "-I", SCRIPT, *map(str, args)], capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout if text else json.loads(r.stdout)
@@ -89,13 +89,60 @@ class Forge(unittest.TestCase):
         self.assertEqual([r["iid"] for r in out["requests"]], [7])
         self.assertIn("connection refused", out["error"])
 
-    def test_rate_limit_pauses_every_command(self):
+    def test_rate_limit_pauses_every_project_on_the_host(self):
         self.routes([[r".", {"err": "HTTP 429 Too Many Requests"}]])
         self.assertIn("429", self.run_forge("pipelines", *P, 60, 0)["error"])
         n = len(self.calls())
-        out = self.run_forge("milestones", *P, 60, 0)
-        self.assertIn("rate-limited", out["error"])
+        self.assertIn("rate-limited", self.run_forge("milestones", *P, 60, 0)["error"])
+        self.assertIn("rate-limited", self.run_forge("milestones", "gitlab", "gitlab.com", "acme/other", 60, 0)["error"])
         self.assertEqual(len(self.calls()), n, "no call while backing off")
+        self.routes([[r".", {"err": "404 Not Found: merge request 429"}]])
+        self.run_forge("pipelines", "gitlab", "git.acme.io", "a/b", 60, 0)
+        self.assertNotIn("rate-limited", self.run_forge("pipelines", "gitlab", "git.acme.io", "a/b", 60, 0)["error"],
+                         "a 429 inside other text isn't a rate limit")
+
+    def test_timeouts_and_garbage_keep_the_last_answer(self):
+        self.routes([[r"pipelines", {"out": []}]])
+        self.run_forge("pipelines", *P, 60, 0)
+        self.routes([[r".", {"out": "<html>502 Bad Gateway</html>"}]])
+        out = self.run_forge("pipelines", *P, 0, 1)
+        self.assertEqual(out["pipelines"], [])
+        self.assertIn("isn't JSON", out["error"])
+        self.routes([[r".", {"sleep": 2, "out": []}]])
+        out = self.run_forge("pipelines", *P, 0, 1, HERDR_FORGE_CLI_TIMEOUT="0.5")
+        self.assertEqual(out["pipelines"], [])
+        self.assertIn("longer than", out["error"])
+
+    def test_a_first_failure_still_has_the_data_keys(self):
+        self.routes([[r".", {"err": "boom"}]])
+        for cmd, key in [("requests", "requests"), ("pipelines", "pipelines"), ("runners", "runners"), ("milestones", "milestones")]:
+            out = self.run_forge(cmd, *P, 60, 0)
+            self.assertEqual(out[key], [], cmd)
+            self.assertIn("boom", out["error"])
+        self.assertEqual(self.run_forge("velocity", *P, 60, 0, "12w", NOW, 0)["rows"][0]["values"], [0] * 12)
+
+    def test_stale_first_read_never_fetches_when_cached(self):
+        self.routes([[r"pipelines", {"out": [{"id": 1, "status": "success", "web_url": "u", "updated_at": iso(NOW)}]}]])
+        self.run_forge("pipelines", *P, 60, 0)
+        n = len(self.calls())
+        self.assertEqual(len(self.run_forge("pipelines", *P, -1, 0)["pipelines"]), 1)
+        self.assertEqual(len(self.calls()), n)
+
+    def test_a_fetch_in_flight_elsewhere_serves_the_last_answer(self):
+        import sqlite3
+        self.routes([[r"pipelines", {"out": []}]])
+        self.run_forge("pipelines", *P, 60, 0)
+        db = sqlite3.connect(os.path.join(self.home, ".local/share/herdr-forge/gitlab.com/acme__shop.db"))
+        db.execute("UPDATE cache SET at=0, lease=? WHERE k='pipelines'", (time.time() + 30,))
+        db.commit()
+        n = len(self.calls())
+        self.assertIsNone(self.run_forge("pipelines", *P, 60, 0)["error"])
+        self.assertEqual(len(self.calls()), n, "someone else holds the lease")
+        db.execute("UPDATE cache SET shape=999 WHERE k='pipelines'")
+        db.commit()
+        db.close()
+        self.run_forge("pipelines", *P, 60, 0)
+        self.assertGreater(len(self.calls()), n, "another version's answer is a miss")
 
     @unittest.skipIf(any(os.path.exists(f"{d}/glab") for d in ["/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"]),
                      "a real glab is installed where forge.py looks")
@@ -222,6 +269,28 @@ class Forge(unittest.TestCase):
         call = self.calls()[-1]
         for part in ["add_labels=priority::high", "remove_labels=priority::low", "milestone_id=0", "state_event=close"]:
             self.assertIn(part, call)
+
+    def test_a_long_first_sync_finishes_over_several_calls(self):
+        page1 = [issue(k) for k in range(1, 101)]
+        self.routes([[r"issues\?scope=all.*page=1$", {"out": page1}],
+                     [r"issues\?scope=all.*page=2$", {"out": [issue(101)]}],
+                     [r"/labels", {"out": []}], [r"milestones", {"out": []}],
+                     [r"graphql", {"out": {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": [{"iid": "1"}]}}}}}]])
+        out = self.run_forge("sync", *P, 0, 1, HERDR_FORGE_BUDGET="0")
+        self.assertTrue(out["more"])
+        self.assertEqual(self.run_forge("query", *P, "{}")["total"], 100, "the first page is kept")
+        self.run_forge("sync", *P, 0, 1, HERDR_FORGE_BUDGET="0")
+        self.assertTrue(any("updated_after" in c for c in self.calls()), "the next call carries on from the cursor")
+
+    def test_issue_writes_refresh_milestones(self):
+        self.sync_issues([issue(1)])
+        self.routes([[r"milestones\?state=active", {"out": []}]])
+        self.run_forge("milestones", *P, 600, 0)
+        self.routes([[r"-X PUT", {"out": issue(1, state="closed")}], [r"milestones\?state=active", {"out": []}]])
+        self.run_forge("update", *P, 1, json.dumps({"state": "closed"}))
+        n = len(self.calls())
+        self.run_forge("milestones", *P, 600, 0)
+        self.assertGreater(len(self.calls()), n)
 
     def test_reconcile_drops_deleted_issues(self):
         self.sync_issues([issue(1), issue(2)])
