@@ -1,4 +1,4 @@
-// Copies shared/lib.js into every mods/forge-* folder, and shared/forge.py into every
+// Copies shared/lib.js and shared/ui.js into every mods/forge-* folder, and shared/forge.py into every
 // one that talks to a forge, stamping forge.py's VERSION with package.json's version and
 // a hash of its contents (mods install each version once per machine). `--check` only reports copies that
 // differ, for the tests and CI.
@@ -12,6 +12,7 @@ const NO_FORGE = new Set(["forge-toggle"]); // layout glue: never calls forge.py
 
 export function expected() {
   const lib = readFileSync(join(root, "shared/lib.js"), "utf8");
+  const ui = readFileSync(join(root, "shared/ui.js"), "utf8");
   const py = readFileSync(join(root, "shared/forge.py"), "utf8");
   // <release>+<hash>: the release orders versions, the hash tells builds apart.
   const { version: rel } = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -30,6 +31,7 @@ export function expected() {
   }
   for (const mod of readdirSync(join(root, "mods")).filter((m) => m.startsWith("forge-")).sort()) {
     out.set(join("mods", mod, "lib.js"), lib);
+    out.set(join("mods", mod, "ui.js"), ui);
     if (!NO_FORGE.has(mod)) out.set(join("mods", mod, "forge.py"), stamped);
   }
   return out;

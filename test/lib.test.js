@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  actionList, ago, clock, fill, forgeClient, isShown, issueItem, matches, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf,
+  actionList, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf,
 } from "../shared/lib.js";
 
 test("projectOf defaults to GitLab and infers the provider from the host", () => {
@@ -199,4 +199,19 @@ test("forge.py stays small enough to send as one argument", async () => {
   const { statSync } = await import("node:fs");
   // Linux caps one argument at 128 KiB; past 100 KB, compress it or send it in parts.
   assert.ok(statSync(new URL("../shared/forge.py", import.meta.url)).size < 100_000);
+});
+
+test("findBlocks and collapse sizes", () => {
+  const tree = { type: "row", children: [
+    { id: "a", type: "block", size: { px: 34 }, content: { mod: "forge-ci", props: { repo: "a/b" } } },
+    { id: "b", type: "block", hidden: true, content: { mod: "forge-ci", props: { repo: "c/d" } } }],
+    floating: [{ id: "f", content: { mod: "forge-ci" } }] };
+  assert.deepEqual(findBlocks(tree, "forge-ci", { repo: "a/b" }).map((b) => b.id), ["a"]);
+  assert.deepEqual(findBlocks(tree, "forge-ci").map((b) => b.id), ["a", "b", "f"]);
+  assert.ok(isCollapsed(findBlocks(tree, "forge-ci")[0]));
+  assert.deepEqual(findBlocks(tree, "forge-ci").map((b) => b.parent), ["row", "row", "floating"]);
+  assert.ok(!isCollapsed(findBlocks(tree, "forge-ci")[1]));
+  assert.deepEqual(expandedSize({ px: 200 }), { px: 200 });
+  assert.deepEqual(expandedSize({ px: 34 }), { weight: 1 }, "never 'expand' to the collapsed size");
+  assert.deepEqual(expandedSize(null), { weight: 1 });
 });

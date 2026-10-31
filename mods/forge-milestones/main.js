@@ -1,7 +1,8 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, readTextFile, appHome, props, theme, layout, panes, spaces } from "herdr";
-import { forgeClient, projectOf, isShown, openUrl, ago } from "./lib.js";
+import { exec, readTextFile, appHome, props, theme } from "herdr";
+import { forgeClient, projectOf, openUrl } from "./lib.js";
+import { Chrome, note, staleError } from "./ui.js";
 
 // Active milestones for one project, with issue progress. Click a milestone to expand its
 // issues (open first); ↗ opens it in the browser; ↻ fetches again.
@@ -11,7 +12,6 @@ import { forgeClient, projectOf, isShown, openUrl, ago } from "./lib.js";
 const MOD = "forge-milestones";
 const EVERY = 300;          // seconds: how old an answer may be before we fetch again
 const DAY = 86400000;
-const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const msg = (e) => String(e?.message ?? e);
 
@@ -33,6 +33,8 @@ function dueText(ms) {
 export default class Milestones extends View {
   init(_props, cx) {
     this.forge = forgeClient({ exec, readTextFile }, `${appHome()}/mods/${MOD}/forge.py`);
+    this.chrome = new Chrome(MOD, { repo: props()?.repo });
+    this.chrome.attach(cx);
     this.list = [];             // Milestone, plus pct and dueMs
     this.at = 0;                // when the answer was fetched (epoch s)
     this.error = null;
@@ -47,8 +49,9 @@ export default class Milestones extends View {
 
   project() { return projectOf(props() ?? {}); }
 
+  // On screen and not collapsed (a detached window counts).
   shown() {
-    return isShown(layout(), MOD, { repo: props()?.repo }, { panes: panes(), spaces: spaces() });
+    return this.chrome.visible();
   }
 
   tick(cx) {
@@ -84,9 +87,10 @@ export default class Milestones extends View {
 
   async load(p, maxAge, force) {
     const out = await this.forge(["milestones", p.provider, p.host, p.repo, maxAge, force ? 1 : 0], { on: p.on });
+    // Soonest due first (overdue ones lead), undated last.
     this.list = (out.milestones ?? []).map((m) => ({
       ...m, dueMs: dueMs(m.due), pct: m.all ? Math.round((m.closed / m.all) * 100) : 0,
-    }));
+    })).sort((a, b) => (a.dueMs ?? Infinity) - (b.dueMs ?? Infinity));
     this.at = out.at ?? 0;
     this.error = out.error ?? null;
   }
@@ -161,7 +165,9 @@ export default class Milestones extends View {
           .hover((s) => s.bg(t.raised).text_color(t.foreground))
           .on_click((_e, cx) => { cx.stop_propagation(); openUrl(exec, m.url); })
           .child("↗"))
-        .when(Boolean(d), (e) => e.child(div().text_size(11).text_color(d.late ? t.ansi1 : t.muted).child(d.text))))
+        .when(Boolean(d), (e) => e.child(d.late
+          ? div().flex_none().px(5).rounded(4).bg(t.ansi1 + "26").text_size(10.5).text_color(t.ansi1).child(d.text)
+          : div().flex_none().text_size(11).text_color(t.muted).child(d.text))))
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().h(4).rounded(2).bg(t.raised).overflow_hidden()
           .child(div().h_full().w(`${m.pct}%`).rounded(2).bg(m.pct === 100 ? t.ansi2 : t.accent)))
@@ -172,27 +178,21 @@ export default class Milestones extends View {
 
   render(cx) {
     const t = theme(), p = this.project();
-    const header = h_flex().h(34).flex_none().pl(12).pr(6).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(div().font_semibold().child("Milestones"))
-      .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(String(this.list.length)))
-      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(p.repo))
-      .when(this.at > 0, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(ago(this.at * 1000))))
-      .child(div().id("ms-refresh").w(18).flex_none().text_size(12).text_color(t.muted).cursor_pointer()
-        .hover((s) => s.text_color(t.foreground))
-        .on_click((_e, cx) => this.refresh(cx, true))
-        .child(this.loading ? div().frames(FRAMES, 90) : "↻"));
-
-    const note = (text, color) => div().p(12).text_size(12).text_color(color).child(text);
-    let body;
-    if (!p.repo) body = note("No repo set (props.repo).", t.muted);
-    else if (!p.provider) body = note(`${p.host} isn't a forge this panel supports.`, t.muted);
-    else if (!this.list.length) body = this.error ? note(this.error, t.ansi1)
-      : note(this.loading || !this.started ? "Loading…" : "No active milestones.", t.muted);
+    const header = this.chrome.header(t, {
+      title: "Milestones", count: this.list.length, sub: p.repo, at: this.at ? this.at * 1000 : null,
+      loading: this.loading, onRefresh: (cx) => this.refresh(cx, true),
+    });
+    let body = null;
+    if (this.chrome.collapsed()) body = null;
+    else if (!p.repo) body = note(t, "No repo set (props.repo).");
+    else if (!p.provider) body = note(t, `${p.host} isn't a forge this panel supports.`);
+    else if (!this.list.length) body = this.error ? note(t, this.error, { error: true })
+      : note(t, this.loading || !this.started ? "Loading…" : "No active milestones.");
     else body = v_flex().id("ms-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
-      .when(Boolean(this.error), (e) => e.child(div().px(8).py(2).text_size(11).text_color(t.ansi1).child(this.error)))
+      .when(Boolean(this.error), (e) => e.child(staleError(t, this.error)))
       .children(this.list.map((m) => this.milestone(m, t)));
 
     return v_flex().id("milestones").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
-      .child(header).child(body);
+      .child(header).when(Boolean(body), (e) => e.child(body));
   }
 }

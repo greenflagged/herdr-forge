@@ -206,6 +206,34 @@ function shownInTree(tree, mod, match) {
   return found ? shown : null;
 }
 
+// The layout blocks showing this mod (with these props, where given): [{ id, size, hidden }].
+// The layout blocks showing this mod (with these props, where given):
+// [{ id, size, hidden, parent }], parent being the containing node's type ("row",
+// "column", "stack", "floating").
+export function findBlocks(tree, mod, match = {}) {
+  const out = [];
+  const walk = (n, parent) => {
+    if (!n || typeof n !== "object") return;
+    const c = n.content;
+    if (c?.mod === mod && n.id && Object.entries(match).every(([k, v]) => v == null || c.props?.[k] === v)) {
+      out.push({ id: n.id, size: n.size ?? null, hidden: Boolean(n.hidden), parent });
+    }
+    for (const k of Array.isArray(n.children) ? n.children : []) walk(k, n.type ?? null);
+    for (const f of Array.isArray(n.floating) ? n.floating : []) walk(f, "floating");
+  };
+  walk(tree, null);
+  return out;
+}
+
+// Panel chrome (ui.js) collapses a block in place by sizing it to its header. A block
+// that size is collapsed; expanding gives back the size it had (or a share of the column).
+export const HEADER_PX = 34;
+export const isCollapsed = (block) => block?.size?.px === HEADER_PX;
+export function expandedSize(saved) {
+  if (saved && typeof saved === "object" && (saved.px > HEADER_PX || saved.weight > 0)) return saved;
+  return { weight: 1 };
+}
+
 // ---- actions: buttons people add to issues and requests ----
 //
 // An action is { id, label, tooltip?, when?, confirm?, primary?, ...one of }:
