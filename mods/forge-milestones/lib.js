@@ -64,9 +64,13 @@ exec(compile(open(p).read(),p,"exec"),{"__name__":"__main__","__file__":p})`;
 // Writes forge-<version>.py (what boot runs), and forge.py (the stable path agents and
 // skills call) unless a newer release is already there; removes versions unused for two
 // weeks. Every mod may install at once on first start: each writes its own temp file.
+// The folder also holds the caches (issue text): private to its owner, like forge.py makes it.
 const INSTALL = `import os,sys,glob,time,re
+os.umask(0o077)
 ${DIR}
-os.makedirs(d,exist_ok=True)
+os.makedirs(d,mode=0o700,exist_ok=True)
+try: os.chmod(d,0o700)
+except OSError: pass
 v,t=sys.argv[1],sys.argv[2]
 rel=lambda s:tuple(int(x) for x in re.findall(r"\\d+",s.split("+")[0]))
 def put(n):
@@ -254,6 +258,7 @@ export function requestItem(r, project) {
     repo: project.repo, host: project.host, provider: project.provider, author: r.author ?? null,
     labels: r.labels ?? [], created_ms: r.created_ms ?? null, source: r.source ?? null, target: r.target ?? null,
     sha: r.sha ?? null, draft: Boolean(r.draft), conflicts: Boolean(r.conflicts), ci_status: r.ci?.status ?? null,
+    fork: Boolean(r.fork),
   };
 }
 
@@ -342,13 +347,17 @@ export function describe(a) {
 }
 
 // Where agents start for a project: props.folder, else a space on `on` whose folder is
-// named after the repo (".../shop" or ".../acme-shop"), else null.
+// named after the repo, exactly: "shop" or "acme-shop" for acme/shop (not "other-shop",
+// which is some other project), else null.
 export function checkoutOf(folder, spaces, on, repo) {
   if (folder) return folder;
-  const name = (repo ?? "").split("/").pop();
+  const parts = (repo ?? "").split("/");
+  const name = parts[parts.length - 1];
   if (!name) return null;
+  const names = new Set([name]);
+  if (parts.length > 1) names.add(`${parts[parts.length - 2]}-${name}`);
   return spaces.find((s) => (s.machine ?? null) === (on ?? null) && typeof s.folder === "string"
-    && (s.folder.endsWith(`/${name}`) || s.folder.endsWith(`-${name}`)))?.folder ?? null;
+    && names.has(s.folder.replace(/\/+$/, "").split("/").pop()))?.folder ?? null;
 }
 
 // Fills a list of arguments, refusing a whole-argument placeholder that turns into an option.
@@ -371,6 +380,9 @@ export async function runAction(a, ctx, env, h) {
     let folder = fill(a.folder, ctx) ?? env.folder;
     if (!folder) throw new Error("No checkout set (props.folder).");
     if (a.worktree) {
+      // The worktree is found and fetched by branch name in our repo: a fork's branch of
+      // the same name would be someone else's code, or not there at all.
+      if (ctx.fork) throw new Error("This request comes from a fork: check out fork MRs by hand.");
       if (!ctx.source || ctx.source.startsWith("-")) throw new Error("No branch to check out.");
       const r = await h.exec("sh", ["-c", WORKTREE, "sh", ctx.source], { cwd: folder, on });
       if (r.code !== 0 || !r.stdout.trim()) throw new Error(r.stderr.trim() || `Couldn't check out ${ctx.source}`);

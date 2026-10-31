@@ -57,12 +57,12 @@ test("checkoutOf prefers props.folder, else a space on that machine named after 
   const spaces = [
     { machine: "mac", folder: "/u/src/shop" },
     { machine: null, folder: "/home/me/src/other" },
-    { machine: null, folder: "/home/me/.herdr/worktrees/x-shop" },
+    { machine: null, folder: "/home/me/.herdr/worktrees/acme-shop" },
     { machine: null, folder: null },
   ];
   assert.equal(checkoutOf("/given", spaces, null, "acme/shop"), "/given");
   assert.equal(checkoutOf(null, spaces, "mac", "acme/shop"), "/u/src/shop");
-  assert.equal(checkoutOf(null, spaces, null, "acme/shop"), "/home/me/.herdr/worktrees/x-shop");
+  assert.equal(checkoutOf(null, spaces, null, "acme/shop"), "/home/me/.herdr/worktrees/acme-shop");
   assert.equal(checkoutOf(undefined, spaces, undefined, "acme/none"), null);
   assert.equal(checkoutOf(null, spaces, null, ""), null);
 });
