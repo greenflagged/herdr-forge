@@ -35,7 +35,10 @@ Panels there work the same way.
   online runner has their tags.
 - **Milestones:** progress for each active milestone, soonest due first. Click one for its issues.
 - **Velocity:** commits, merged MRs, closed issues and MR cycle time over 12 weeks or 30 days, against
-  your average week.
+  your average week. Days run midnight to midnight in your time zone.
+
+Ages ("2h", "due in 3d") are everywhere; hover one for the date and time in your own time zone,
+which it names ("Oct 31, 1:40 PM UTC−7"). Due dates are calendar days, the same in every zone.
 
 ## Which buttons start an agent
 

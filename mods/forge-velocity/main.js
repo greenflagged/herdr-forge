@@ -1,9 +1,9 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, readTextFile, appHome, focused, spaces, panes, props, theme, window } from "herdr";
-import { forgeClient, parseRemote, providerForHost, TERMS, num } from "./lib.js";
+import { forgeClient, parseRemote, providerForHost, TERMS, num, tzArg, zoneLabel } from "./lib.js";
 import { Chrome, note } from "./ui.js";
-import { prepare, bucketLabel, day } from "./view.js";
+import { prepare, bucketLabel, rangeStart } from "./view.js";
 
 // Velocity of the focused project: commits, merged requests, closed issues and request
 // cycle time, last 12 weeks (or 30 days). Follows the focused terminal's repo on its
@@ -149,7 +149,8 @@ export default class Velocity extends View {
     cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const out = await this.forge(["commits", s.top, s.ref, range, Date.now(), new Date().getTimezoneOffset(), force ? 1 : 0], { on: s.on });
+        const now = Date.now();
+        const out = await this.forge(["commits", s.top, s.ref, range, now, tzArg(now), force ? 1 : 0], { on: s.on });
         if (range !== this.range) { s.cAt = 0; return; } // asked for the other range: again
         s.commits = out;
         s.cErr = out.error ?? null;
@@ -172,7 +173,8 @@ export default class Velocity extends View {
     for (const [i, on] of where.entries()) {
       const more = i < where.length - 1;
       try {
-        out = await this.forge(["velocity", s.provider, s.host, s.path, maxAge, force ? 1 : 0, range, Date.now(), new Date().getTimezoneOffset()], { on });
+        const now = Date.now();
+        out = await this.forge(["velocity", s.provider, s.host, s.path, maxAge, force ? 1 : 0, range, now, tzArg(now)], { on });
       } catch (e) {
         last = e;
         if (more) continue;
@@ -273,7 +275,7 @@ export default class Velocity extends View {
     const range = (id) => div().id(`range-${id}`).flex_none().px(5).rounded(4).border_1().text_size(10).cursor_pointer()
       .when(this.range === id, (e) => e.border_color(t.border).bg(t.raised).text_color(t.foreground))
       .when(this.range !== id, (e) => e.border_color(t.background).text_color(t.dim).hover((h) => h.text_color(t.foreground)))
-      .tooltip(id === "12w" ? "Last 12 weeks" : "Last 30 days")
+      .tooltip(id === "12w" ? "Last 12 weeks" : `Last 30 days, midnight to midnight ${zoneLabel()}`)
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => { cx.stop_propagation(); this.setRange(id, cx); })
       .child(id);
@@ -314,7 +316,7 @@ export default class Velocity extends View {
         .child(div().text_size(10).text_color(this.hover != null ? t.foreground : this.followed ? t.dim : t.ansi3).truncate().child(caption))
         .children(v.rows.map((r) => this.row(r, t, sel)))
         .child(h_flex().justify_between().text_size(9).text_color(t.dim)
-          .child(v.start != null ? day(v.start) : "").child(this.range === "30d" ? "today" : "now"))
+          .child(rangeStart(v)).child(this.range === "30d" ? "today" : "now"))
         .when(Boolean(warn), (e) => e.child(div().text_size(11).text_color(warn.color).child(warn.text))))
       .child(div().flex_none().h(24).px(12).border_t(1).border_color(t.border).flex().items_center()
         .text_size(10).text_color(t.dim).child(div().truncate().child(footer)));

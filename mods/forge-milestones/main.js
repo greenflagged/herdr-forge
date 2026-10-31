@@ -1,7 +1,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, readTextFile, appHome, props, theme } from "herdr";
-import { forgeClient, projectOf, openUrl } from "./lib.js";
+import { forgeClient, projectOf, openUrl, localDay, daysUntil, dateLabel } from "./lib.js";
 import { Chrome, note, staleError } from "./ui.js";
 
 // Active milestones for one project, with issue progress. Click a milestone to expand its
@@ -11,20 +11,12 @@ import { Chrome, note, staleError } from "./ui.js";
 
 const MOD = "forge-milestones";
 const EVERY = 300;          // seconds: how old an answer may be before we fetch again
-const DAY = 86400000;
-
 const msg = (e) => String(e?.message ?? e);
 
-// "YYYY-MM-DD" -> local midnight, epoch ms. Done once per answer, never in render.
-function dueMs(date) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date ?? "");
-  return m ? new Date(+m[1], +m[2] - 1, +m[3]).getTime() : null;
-}
-
-function dueText(ms) {
-  if (ms == null) return null;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const days = Math.round((ms - today.getTime()) / DAY);
+// Due dates are calendar days ("YYYY-MM-DD"), counted against the viewer's today.
+function dueText(date) {
+  const days = daysUntil(date);
+  if (days == null) return null;
   if (days < 0) return { text: `${-days}d overdue`, late: true };
   if (days === 0) return { text: "due today", late: false };
   return { text: `due in ${days}d`, late: false };
@@ -93,7 +85,7 @@ export default class Milestones extends View {
     const out = await this.forge(["milestones", p.provider, p.host, p.repo, maxAge, force ? 1 : 0], { on: p.on });
     // Soonest due first (overdue ones lead), undated last.
     this.list = (out.milestones ?? []).map((m) => ({
-      ...m, dueMs: dueMs(m.due), pct: m.all ? Math.round((m.closed / m.all) * 100) : 0,
+      ...m, dueMs: localDay(m.due), dueTip: m.due ? `Due ${dateLabel(m.due)}` : null, pct: m.all ? Math.round((m.closed / m.all) * 100) : 0,
     })).sort((a, b) => (a.dueMs ?? Infinity) - (b.dueMs ?? Infinity));
     this.at = out.at ?? 0;
     this.error = out.error ?? null;
@@ -159,7 +151,7 @@ export default class Milestones extends View {
   }
 
   milestone(m, t) {
-    const d = dueText(m.dueMs), open = this.expanded.has(m.title);
+    const d = dueText(m.due), open = this.expanded.has(m.title);
     const row = v_flex().id(`ms-${m.id}`).px(8).py(6).gap(4).rounded(6).cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => this.toggle(m, cx))
@@ -170,9 +162,9 @@ export default class Milestones extends View {
           .hover((s) => s.bg(t.raised).text_color(t.foreground))
           .on_click((_e, cx) => { cx.stop_propagation(); openUrl(exec, m.url); })
           .child("↗"))
-        .when(Boolean(d), (e) => e.child(d.late
+        .when(Boolean(d), (e) => e.child((d.late
           ? div().flex_none().px(5).rounded(4).bg(t.ansi1 + "26").text_size(10.5).text_color(t.ansi1).child(d.text)
-          : div().flex_none().text_size(11).text_color(t.muted).child(d.text))))
+          : div().flex_none().text_size(11).text_color(t.muted).child(d.text)).id(`ms-due-${m.id}`).tooltip(m.dueTip))))
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().h(4).rounded(2).bg(t.raised).overflow_hidden()
           .child(div().h_full().w(`${m.pct}%`).rounded(2).bg(m.pct === 100 ? t.ansi2 : t.accent)))

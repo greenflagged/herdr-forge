@@ -1,7 +1,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, readTextFile, appHome, props, theme, window, notify } from "herdr";
-import { forgeClient, projectOf, ago, clock, openUrl } from "./lib.js";
+import { forgeClient, projectOf, ago, agoAt, clock, openUrl } from "./lib.js";
 import { Chrome, button, note, staleError } from "./ui.js";
 import { LIVE, pollEvery, groupJobs, jobsStale } from "./ci.js";
 
@@ -222,7 +222,8 @@ export default class CI extends View {
                 .tooltip("Open in the browser")
                 .on_click((_e, cx) => { cx.stop_propagation(); openUrl(exec, p.url); })
                 .child("↗")))
-            .when(!hovered && !acting, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(ago(p.updated_ms, now)))))
+            .when(!hovered && !acting, (e) => e.child(div().id(`age-${p.id}`).flex_none().text_size(10).text_color(t.dim)
+              .tooltip(`Updated ${agoAt(p.updated_ms, now)}`).child(ago(p.updated_ms, now)))))
           .child(h_flex().pl(20).gap(8).text_size(11).text_color(t.muted)
             .child(div().text_color(this.color(t, p.status)).child((p.status ?? "").replace(/_/g, " ")))
             .when(p.iid != null, (e) => e.child(div().text_color(t.dim).child(`#${p.iid}`)))
