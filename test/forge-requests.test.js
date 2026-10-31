@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { actionLabel, actionList, describe, fill, matches, projectOf, requestItem } from "../shared/lib.js";
 import {
-  CI, checkoutOf, defaultActions, itemOf, liveAgents, mergeTip, agentPlaces, parseGitLook, ownersOf, withShared, askTarget, askText, machineOf,
+  CI, checkoutOf, defaultActions, itemOf, liveAgents, mergeTip, mergeBlocked, agentPlaces, parseGitLook, ownersOf, withShared, askTarget, askText, machineOf,
   shownMerged, deployState, checkDue, cleanupPlan, cleanupLines, notDoneWhy, CLEAN_WORKTREE, GIT_LOOK, RECENT,
   WORKTREE_LIST, parseWorktrees, leftoversOf,
   MIGRATIONS, migrationPattern, migrationsOf, orderFacts, clashText, versionKey,
@@ -54,10 +54,21 @@ test("agent buttons carry the mark; Merge says it acts at once, with no agent", 
   assert.match(describe(resolve), /Force-pushes the branch; never merges/);
   assert.equal(actionLabel({ id: "x", label: "Fix it", task: "fix {ref}" }), "✦ Fix it", "your own agent actions too");
   assert.equal(actionLabel({ id: "b", label: "Branch", exec: ["git"] }), "Branch");
-  const gl = mergeTip(request(), projectOf({ repo: "acme/shop" }).terms);
-  assert.match(gl, /^Merge into main now\. No agent/);
-  assert.match(gl, /the pipeline is still running/);
-  assert.match(mergeTip(request(), projectOf({ repo: "acme/shop", provider: "github" }).terms), /required checks are still running/);
+  assert.equal(mergeTip(request()), "Merge into main now. No agent; asks first.");
+});
+
+test("mergeBlocked: no Merge button while CI runs or an agent on the request is working", () => {
+  assert.equal(mergeBlocked(request(), []), false);
+  assert.equal(mergeBlocked(request(), undefined), false);
+  assert.equal(mergeBlocked(request(), [{ status: "idle" }, { status: "blocked" }]), false);
+  assert.equal(mergeBlocked(request(), [{ status: "idle" }, { status: "working" }]), true);
+  for (const status of ["created", "pending", "running", "waiting_for_resource"]) {
+    assert.equal(mergeBlocked(request({ ci: { status } }), []), true, status);
+  }
+  for (const status of ["success", "failed", "manual", "canceled"]) {
+    assert.equal(mergeBlocked(request({ ci: { status } }), []), false, status);
+  }
+  assert.equal(mergeBlocked(request({ ci: null }), []), false, "no CI at all");
 });
 
 test("default tasks fill every placeholder and use the forge's words", () => {

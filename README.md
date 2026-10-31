@@ -74,7 +74,7 @@ Hover an MR (or PR) to get these buttons:
 
 | Button | Shows on | What it does | Agent? |
 |---|---|---|---|
-| **Merge** | MRs that aren't drafts and have no conflicts | Merges now, only the commit you saw. If CI is still running, it turns on auto-merge instead. | No |
+| **Merge** | MRs that aren't drafts and have no conflicts | Merges now, only the commit you saw. Hidden while CI is still running or an agent on the branch is working. | No |
 | **✦ Get merged** | MRs open a day or more, without conflicts | Starts Claude Code in a worktree of the branch. It fixes failing CI, conflicts and review comments, then **waits for your go-ahead before merging**. | Yes |
 | **✦ Fix conflicts** (red) | MRs with conflicts | Starts Claude Code in a worktree of the branch. It rebases onto the target branch, resolves the conflicts, runs the tests and **force-pushes** the branch. It never merges. | Yes |
 | **✦ Rebase** | MRs that must be rebased before merging, or whose migration number is taken | Starts Claude Code in a worktree of the branch. It rebases onto the target, renumbers a clashing migration, runs the tests and **force-pushes** the branch. It never merges. | Yes |
