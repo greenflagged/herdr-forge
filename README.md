@@ -24,7 +24,7 @@ Panels there work the same way.
 
 ## Merge requests and CI
 
-![Open merge requests with CI and conflict badges, next to the pipelines list](docs/requests-ci.png)
+![Open merge requests, milestones with their progress, and the pipelines list](docs/requests-ci.png)
 
 - **Merge requests:** each open MR with its draft, auto-merge, conflict and pipeline status. Hover one
   for **Merge**. It asks first, and it merges only the commit you saw.
