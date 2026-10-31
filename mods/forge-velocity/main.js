@@ -9,7 +9,8 @@ import { prepare, bucketLabel, rangeStart } from "./view.js";
 // cycle time, last 12 weeks (or 30 days). Follows the focused terminal's repo on its
 // machine, unless props.folder names a checkout to show. forge.py does the fetching, caching and bucketing; this file only draws.
 // - Commits: `forge.py commits` on the repo's machine (git log of the default branch,
-//   fetched every 15 min there). Asked every 5 min while shown.
+//   fetched every 15 min there). Asked every 5 min while shown. The first ask for a repo (or
+//   range) takes the cached counts without git, then asks again for fresh ones.
 // - Requests and issues: `forge.py velocity` with the repo's remote (host and path).
 //   Asked every 5 min while shown; forge.py fetches when its copy is 15 min old and the
 //   window is active (otherwise it only re-buckets what it has). A repo whose host isn't a
@@ -131,7 +132,7 @@ export default class Velocity extends View {
   state(meta) {
     const provider = meta.host && meta.path ? providerForHost(meta.host, props()?.forges ?? {}) : null;
     const s = { ...meta, meta, provider, terms: TERMS[provider] ?? TERMS.gitlab,
-      commits: null, cAt: 0, cBusy: false, cErr: null,
+      commits: null, cAt: 0, cBusy: false, cErr: null, cQuick: true,
       velocity: null, vAt: 0, vBusy: false, vErr: null, vQuick: true, nocli: false,
       forgeOn: undefined, view: null };
     this.prepare(s);
@@ -142,18 +143,32 @@ export default class Velocity extends View {
     s.view = prepare(s.commits, s.velocity, s.terms, Boolean(s.provider), this.range);
   }
 
+  // Stale-first, like loadVelocity: the first call for a repo (or range) answers from
+  // forge.py's cache without git; the second may fetch, and redraws when it's back.
   loadCommits(s, force, cx) {
     const range = this.range;
+    const quick = s.cQuick && !force;
+    s.cQuick = false;
     s.cBusy = true;
     s.cAt = Date.now();
     cx.notify();
     cx.spawn(async (cx) => {
-      try {
+      const ask = (q) => {
         const now = Date.now();
-        const out = await this.forge(["commits", s.top, s.ref, range, now, tzArg(now), force ? 1 : 0], { on: s.on });
-        if (range !== this.range) { s.cAt = 0; return; } // asked for the other range: again
+        return this.forge(["commits", s.top, s.ref, range, now, tzArg(now), force ? 1 : 0, q ? 1 : 0], { on: s.on });
+      };
+      const take = (out) => {
+        if (range !== this.range) { s.cQuick = true; s.cAt = 0; return false; } // asked for the other range: again
         s.commits = out;
         s.cErr = out.error ?? null;
+        return true;
+      };
+      try {
+        if (take(await ask(quick)) && quick) {
+          this.prepare(s);
+          cx.notify();
+          take(await ask(false));
+        }
       } catch (e) {
         s.cErr = msg(e);
       } finally {
@@ -234,7 +249,7 @@ export default class Velocity extends View {
     this.hover = null;
     store("range", id);
     // Re-bucket from forge.py's copies (no fetch) on the next tick.
-    for (const s of Object.values(this.data)) { s.cAt = 0; s.vAt = 0; s.vQuick = true; }
+    for (const s of Object.values(this.data)) { s.cAt = 0; s.vAt = 0; s.cQuick = true; s.vQuick = true; }
     cx.notify();
   }
 

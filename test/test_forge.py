@@ -245,6 +245,36 @@ class Forge(unittest.TestCase):
         self.assertEqual(out["total"], 3)
         self.assertEqual(out["row"]["values"][-1], 3)
 
+    def commit_repo(self, n):
+        repo = os.path.join(self.home, "repo")
+        env = {**os.environ, "HOME": self.home, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        if not os.path.isdir(repo):
+            subprocess.run(["git", "init", "-q", repo], check=True, env=env)
+            # A remote that can't be reached: a fetch would fail, never hang.
+            subprocess.run(["git", "-C", repo, "remote", "add", "origin", os.path.join(self.home, "nowhere")], check=True)
+        for k in range(n):
+            subprocess.run(["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", f"c{k}"], check=True, env=env)
+        subprocess.run(["git", "-C", repo, "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+        return repo
+
+    def test_commits_quick_answers_from_the_cache_without_git(self):
+        repo = self.commit_repo(3)
+        now = int(time.time() * 1000)
+        self.assertEqual(self.run_forge("commits", repo, "origin/main", "30d", now, 0, 0)["total"], 3)
+        self.commit_repo(2)
+        quick = self.run_forge("commits", repo, "origin/main", "30d", now, 0, 0, 1)
+        self.assertEqual(quick["total"], 3, "quick: the cached count, git not asked")
+        self.assertEqual(self.run_forge("commits", repo, "origin/main", "30d", now, 0, 1)["total"], 5)
+
+    def test_commits_quick_with_nothing_cached_reads_git_but_never_fetches(self):
+        repo = self.commit_repo(3)
+        out = self.run_forge("commits", repo, "origin/main", "30d", int(time.time() * 1000), 0, 0, 1)
+        self.assertEqual(out["total"], 3)
+        self.assertEqual(out["fetched"], 0, "no fetch on a quick answer")
+        normal = self.run_forge("commits", repo, "origin/main", "30d", int(time.time() * 1000), 0, 0)
+        self.assertGreater(normal["fetched"], 0, "the normal call fetches when it's due")
+
     # -- issues --
 
     def sync_issues(self, issues, labels=()):
