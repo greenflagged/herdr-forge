@@ -187,6 +187,17 @@ export function ownersOf(r, places, git, project) {
   return out;
 }
 
+// The owners plus the agents another panel says are on the request (shared
+// forge.requestAgents: [{ address }]). Work finds those from where an agent's processes
+// run, so it catches a worker whose own folder is the main checkout but whose work is in
+// the branch's worktree. Marked shared: Clean up ends them but never takes their folder.
+export function withShared(owners, list, places) {
+  if (!Array.isArray(list) || !list.length) return owners;
+  const have = new Set(owners.map((o) => o.address));
+  const more = list.map(({ address }) => places.get(address)).filter((pl) => pl && !have.has(pl.address));
+  return more.length ? [...owners, ...more.map((pl) => ({ ...pl, shared: true }))] : owners;
+}
+
 // Who to talk to about a request: a top-level owner, else the agent that started an
 // owning sub-agent (it's the one running that work). null: no one we can type to.
 export function askTarget(owners, places) {
@@ -216,9 +227,40 @@ export function askText(kind, r, terms, clash = "") {
 export const RECENT = 24 * 3600000;     // merged this lately: shown whether or not anyone's on it
 const NO_CI_GRACE = 10 * 60000;         // no pipeline this long after merging: there won't be one
 
-// The merged requests worth a row: recent ones, and older ones an agent is still on.
-export function shownMerged(merged, ownersOfReq, now) {
-  return (merged ?? []).filter((m) => now - m.merged_ms < RECENT || (!m.fork && ownersOfReq(m).length > 0));
+// The merged requests worth a row: recent ones, and older ones an agent is still on or
+// that left a worktree behind (leftoversOf(m): the ones on its branch, as below).
+export function shownMerged(merged, ownersOfReq, now, leftoversOf = () => []) {
+  return (merged ?? []).filter((m) => now - m.merged_ms < RECENT
+    || (!m.fork && (ownersOfReq(m).length > 0 || leftoversOf(m).length > 0)));
+}
+
+// Workers often finish and exit, leaving their worktree behind with no agent in it. The
+// checkout's worktrees come from `git worktree list --porcelain` run there.
+export const WORKTREE_LIST = ["worktree", "list", "--porcelain"];
+
+// What WORKTREE_LIST printed -> the linked worktrees on a branch: [{ top, head, branch }].
+// Leaves out the main checkout (always first), detached ones, locked ones (git won't
+// remove them without --force) and prunable ones (their folder is already gone).
+export function parseWorktrees(stdout) {
+  const out = [];
+  const blocks = String(stdout ?? "").split(/\n\s*\n/).map((b) => b.split("\n").filter(Boolean)).filter((b) => b.length);
+  for (const lines of blocks.slice(1)) {
+    const w = {};
+    for (const l of lines) {
+      const i = l.indexOf(" ");
+      const [k, v] = i < 0 ? [l, ""] : [l.slice(0, i), l.slice(i + 1)];
+      w[k] = v;
+    }
+    if (!w.worktree || !w.branch?.startsWith("refs/heads/") || "locked" in w || "prunable" in w || "bare" in w) continue;
+    out.push({ top: w.worktree, head: w.HEAD || null, branch: w.branch.slice("refs/heads/".length) });
+  }
+  return out;
+}
+
+// The worktrees still on merged request m's branch (never for a fork's request).
+export function leftoversOf(m, worktrees) {
+  if (!m?.source || m.fork) return [];
+  return (worktrees ?? []).filter((w) => w.branch === m.source);
 }
 
 // Where a merged request has got to. checks: Map merge sha -> { state: "yes"|"no"|"error", text }.
@@ -246,12 +288,13 @@ export function checkDue(m, deploy, checks, now, every) {
 }
 
 // What "Clean up" would do for a merged request m, from its owners (ownersOf), every place
-// (agentPlaces), panes() and terminals(), and what git said about each folder.
+// (agentPlaces), panes() and terminals(), what git said about each folder, and the
+// worktrees left on its branch with no agent in them (leftoversOf; on `machine`).
 // { blocked: why not | null, tabs: [{ id, name }] to close, kills: [{ address, name }] to end,
 //   worktrees: [{ machine, top, branch }] to remove, kept: [{ top, why }] }
-export function cleanupPlan(m, owners, places, paneList, terminalList, git) {
+export function cleanupPlan(m, owners, places, paneList, terminalList, git, leftovers = [], machine = null) {
   const plan = { blocked: null, tabs: [], kills: [], worktrees: [], kept: [] };
-  if (!owners.length) return plan;
+  if (!owners.length && !leftovers.length) return plan;
   const owning = new Set(owners.map((o) => o.address));
   // Ending an agent ends its sub-agents too: none of them may be busy.
   const kids = (terminalList ?? []).filter((k) => k.state === "live" && owning.has(k.parent));
@@ -264,13 +307,13 @@ export function cleanupPlan(m, owners, places, paneList, terminalList, git) {
   }
   const tops = new Map(); // place key -> git look
   for (const o of owners) {
-    const g = git.get(o.key);
+    const g = o.shared ? null : git.get(o.key);
     if (g?.top) tops.set(JSON.stringify([o.machine, g.top]), { machine: o.machine, ...g });
   }
   const inside = (cwd, top) => cwd === top || cwd?.startsWith(top.endsWith("/") ? top : `${top}/`);
   for (const o of owners) {
     if (o.parent && owning.has(o.parent)) continue; // its parent's ending covers it
-    const top = git.get(o.key)?.top;
+    const top = o.shared ? null : git.get(o.key)?.top;
     // A tab of nothing but this worktree's terminals goes with it; otherwise just the agent.
     const tabPanes = o.tab ? (paneList ?? []).filter((p) => p.tab === o.tab && p.terminal) : [];
     if (o.tab && top && tabPanes.length && tabPanes.every((p) => inside(p.cwd, top))) {
@@ -284,6 +327,20 @@ export function cleanupPlan(m, owners, places, paneList, terminalList, git) {
     else if (g.branch !== m.source) plan.kept.push({ top: g.top, why: `on ${g.branch ?? "no branch"}, not ${m.source}` });
     else if (m.head_sha && g.head !== m.head_sha) plan.kept.push({ top: g.top, why: "it has commits that weren't merged" });
     else plan.worktrees.push({ machine: g.machine, top: g.top, branch: g.branch });
+  }
+  // Left behind with no agent. A terminal open in one (a shell, say) keeps it: removing
+  // the folder under it would strand it. The owners' tabs and terminals are going anyway.
+  const going = new Set(plan.tabs.map((t) => t.id));
+  const ending = new Set([...owning, ...(terminalList ?? []).filter((k) => owning.has(k.parent)).map((k) => k.address)]);
+  const covered = new Set([...tops.values()].map((g) => g.top));
+  for (const w of leftovers) {
+    if (covered.has(w.top) || w.branch !== m.source) continue;
+    covered.add(w.top);
+    const open = (paneList ?? []).some((p) => !going.has(p.tab) && !ending.has(p.terminal) && inside(p.cwd, w.top))
+      || (terminalList ?? []).some((k) => k.state === "live" && !ending.has(k.address) && inside(k.cwd, w.top));
+    if (open) plan.kept.push({ top: w.top, why: "a terminal is open in it" });
+    else if (m.head_sha && w.head !== m.head_sha) plan.kept.push({ top: w.top, why: "it has commits that weren't merged" });
+    else plan.worktrees.push({ machine, top: w.top, branch: w.branch });
   }
   return plan;
 }

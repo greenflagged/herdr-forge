@@ -123,19 +123,23 @@ minutes, with one call per open MR, and asks for an MR's files again only when i
 
 ### After a merge
 
-Under the open MRs, **Merged lately** lists what merged in the last day, and older merges an agent
-is still on. Each row shows how far its merge got: the pipeline on the merge commit, then, if you
-set up a deploy check, whether it's live. The agents still on the branch are listed underneath.
+Under the open MRs, **Merged lately** lists what merged in the last day, and older merges that an
+agent is still on or that left a worktree behind (shown as "worktree" on the row). Each row shows
+how far its merge got: the pipeline on the merge commit, then, if you set up a deploy check,
+whether it's live. The agents still on the branch are listed underneath.
 
 Hover a merged MR for **Clean up**. It shows you exactly what will go, then:
 
 - closes the agent's tab when everything in the tab is in that worktree, else ends just the agent
-  (ending an agent ends its sub-agents too);
-- removes the worktree with `git worktree remove` and deletes its local branch.
+  (ending an agent ends its sub-agents too). That includes agents another panel lists on the MR
+  (`forge.requestAgents`), such as a worker whose own folder is the main checkout;
+- removes the worktree with `git worktree remove` and deletes its local branch. That includes
+  worktrees on the branch with no agent left in them (the worker finished and exited), found with
+  `git worktree list` in the project's checkout on the forge machine every couple of minutes.
 
-It keeps the worktree when it has uncommitted changes, untracked files or commits that weren't
-merged, and never touches the main checkout. It waits while any of those agents is working or
-needs you. The button is solid once the merge is deployed. Before that it still works, and its
+It keeps the worktree when it has uncommitted changes, untracked files, commits that weren't
+merged, or a terminal open in it. It skips locked worktrees and never touches the main checkout.
+It waits while any of those agents is working or needs you. The button is solid once the merge is deployed. Before that it still works, and its
 confirm says what hasn't happened yet (say, the pipeline failed on the merge commit).
 
 **Deploy check.** Forge can't know how your project deploys, so by default "done" means the merge

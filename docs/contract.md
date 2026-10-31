@@ -264,7 +264,7 @@ Mods talk through Herdr's `shared(key)` / `setShared(key, value)`:
 
 | Key | Written by | Value |
 |---|---|---|
-| `forge.requestAgents` | any mod (e.g. an agents list) | `{requestUrl: [{address, name}]}`: agents working on a request; `forge-requests` and `forge-issues` show them. Optional: `forge-requests` also finds agents on a request's branch itself, and shows both |
+| `forge.requestAgents` | any mod (e.g. an agents list) | `{requestUrl: [{address, name}]}`: agents working on a request; `forge-requests` and `forge-issues` show them. Optional: `forge-requests` also finds agents on a request's branch itself, and shows both. Clean up on a merged request ends the listed agents too (never their folders), so keep an agent listed on its request while it lives, even after its worktree is gone |
 | `forge-requests.actions` | any mod | `{owner: {at, actions: [Action]}}`: extra buttons on requests |
 | `forge-issues.actions` | any mod | `{owner: {at, actions: [Action]}}`: extra buttons on issues |
 | `forge-issues.selected` | `forge-issues` | the open issue's action fields (`issueItem`), or null |

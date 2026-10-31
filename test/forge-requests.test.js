@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { actionLabel, actionList, describe, fill, matches, projectOf, requestItem } from "../shared/lib.js";
 import {
-  CI, checkoutOf, defaultActions, itemOf, liveAgents, mergeTip, agentPlaces, parseGitLook, ownersOf, askTarget, askText, machineOf,
+  CI, checkoutOf, defaultActions, itemOf, liveAgents, mergeTip, agentPlaces, parseGitLook, ownersOf, withShared, askTarget, askText, machineOf,
   shownMerged, deployState, checkDue, cleanupPlan, cleanupLines, notDoneWhy, CLEAN_WORKTREE, GIT_LOOK, RECENT,
+  WORKTREE_LIST, parseWorktrees, leftoversOf,
   MIGRATIONS, migrationPattern, migrationsOf, orderFacts, clashText, versionKey,
 } from "../mods/forge-requests/requests.js";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -295,6 +296,87 @@ test("cleanupPlan waits while an owner or one of its sub-agents is busy", () => 
   assert.deepEqual(plan3.kills.map((k) => k.address), ["t1"]);
 });
 
+// ---- worktrees left behind by agents that already exited ----
+
+test("parseWorktrees keeps linked worktrees on a branch, nothing git wouldn't remove", () => {
+  const out = [
+    "worktree /repo", "HEAD aaa", "branch refs/heads/main", "",
+    "worktree /tmp/scratch", "HEAD bbb", "detached", "",
+    "worktree /wt/fix-login", "HEAD h7", "branch refs/heads/fix-login", "",
+    "worktree /wt/held", "HEAD ccc", "branch refs/heads/held", "locked", "",
+    "worktree /wt/gone", "HEAD ddd", "branch refs/heads/gone", "prunable gitdir file points to non-existent location", "",
+    "worktree /wt/with space", "HEAD eee", "branch refs/heads/feature/x", "",
+  ].join("\n");
+  assert.deepEqual(parseWorktrees(out), [
+    { top: "/wt/fix-login", head: "h7", branch: "fix-login" },
+    { top: "/wt/with space", head: "eee", branch: "feature/x" },
+  ]);
+  assert.deepEqual(parseWorktrees(""), []);
+  assert.deepEqual(parseWorktrees("worktree /repo\nHEAD a\nbranch refs/heads/fix-login\n"), [], "the main checkout never counts");
+});
+
+test("a merged request whose worker exited still shows, and Clean up removes the worktree it left", () => {
+  const wts = [{ top: "/wt/fix-login", head: "h7", branch: "fix-login" }, { top: "/wt/other", head: "x", branch: "other" }];
+  const m = merged({ merged_ms: now - 3 * RECENT });
+  assert.deepEqual(leftoversOf(m, wts), [wts[0]]);
+  assert.deepEqual(leftoversOf({ ...m, fork: true }, wts), [], "a fork's branch name says nothing about our worktrees");
+  assert.deepEqual(shownMerged([m], () => [], now, (x) => leftoversOf(x, wts)).map((x) => x.iid), [7]);
+  assert.deepEqual(shownMerged([m], () => [], now, () => []), [], "nothing left: an old merge drops off");
+
+  const project = projectOf({ repo: "acme/shop" });
+  const pl = agentPlaces([], [], []);
+  const plan = cleanupPlan(m, ownersOf(m, pl, new Map(), project), pl, [], [], new Map(), leftoversOf(m, wts), "mac");
+  assert.deepEqual(plan, { blocked: null, tabs: [], kills: [], worktrees: [{ machine: "mac", top: "/wt/fix-login", branch: "fix-login" }], kept: [] });
+  assert.deepEqual(cleanupLines(plan), ["Remove worktree /wt/fix-login and branch fix-login"]);
+
+  // Kept: more commits than merged, or a terminal still open in it.
+  assert.deepEqual(cleanupPlan(merged({ head_sha: "h9" }), [], pl, [], [], new Map(), [wts[0]]).kept,
+    [{ top: "/wt/fix-login", why: "it has commits that weren't merged" }]);
+  const shell = [{ pane: "p5", tab: "tab5", terminal: "t5", cwd: "/wt/fix-login/src" }];
+  assert.deepEqual(cleanupPlan(m, [], pl, shell, [], new Map(), [wts[0]]),
+    { blocked: null, tabs: [], kills: [], worktrees: [], kept: [{ top: "/wt/fix-login", why: "a terminal is open in it" }] });
+  assert.equal(cleanupPlan(m, [], pl, [], [{ address: "t6", state: "live", cwd: "/wt/fix-login" }], new Map(), [wts[0]]).kept.length, 1);
+  assert.equal(cleanupPlan(m, [], pl, [{ pane: "p5", cwd: "/wt/fix-login-2" }], [], new Map(), [wts[0]]).worktrees.length, 1,
+    "a sibling folder with a longer name isn't inside it");
+});
+
+test("a worktree an owner is in is planned once, and its own tab doesn't keep it", () => {
+  const pl = agentPlaces(after.agents, after.panes, after.terminals);
+  const g = lookOf({ "/wt/fix-login": { branch: "fix-login", remote, head: "h7", top: "/wt/fix-login", linked: true } })(pl);
+  const project = projectOf({ repo: "acme/shop" });
+  const m = merged();
+  const left = [{ top: "/wt/fix-login", head: "h7", branch: "fix-login" }, { top: "/wt/fix-login-old", head: "h7", branch: "fix-login" }];
+  const plan = cleanupPlan(m, ownersOf(m, pl, g, project), pl, after.panes, after.terminals, g, left, null);
+  assert.deepEqual(plan.tabs, [{ id: "tab1", name: "fix-login" }]);
+  assert.deepEqual(plan.worktrees.map((w) => w.top), ["/wt/fix-login", "/wt/fix-login-old"]);
+  assert.deepEqual(plan.kept, []);
+  // Still waits while the owner works, leftovers or not.
+  const busy = agentPlaces([{ ...after.agents[0], status: "working" }, after.agents[1]], after.panes, after.terminals);
+  assert.match(cleanupPlan(m, ownersOf(m, busy, g, project), busy, after.panes, after.terminals, g, left).blocked, /still working/);
+});
+
+test("Clean up ends a finished sub-agent Work ties to the request, though its folder is the main checkout", () => {
+  // A PM in the main checkout started a worker there; the worker did its work in a worktree,
+  // finished, and its terminal is still live (done). Work publishes it on the request.
+  const terms = [{ address: "t1r", parent: "t4", state: "live", status: "done", cwd: "/repo", name: "pypi-source-diff" }];
+  const agentsNow = [{ address: "t4", pane: "p4", tab: "tab4", status: "idle", tab_name: "pm" }];
+  const panesNow = [{ pane: "p4", tab: "tab4", terminal: "t4", cwd: "/repo", branch: "main" }];
+  const pl = agentPlaces(agentsNow, panesNow, terms);
+  const g = lookOf({ "/repo": { branch: "main", remote, head: "y", top: "/repo", linked: false } })(pl);
+  const project = projectOf({ repo: "acme/shop" });
+  const m = merged();
+  assert.deepEqual(ownersOf(m, pl, g, project), [], "its own folder says main");
+  const owners = withShared(ownersOf(m, pl, g, project), [{ address: "t1r", name: "x" }, { address: "gone", name: "y" }], pl);
+  assert.deepEqual(owners.map((o) => [o.address, o.shared]), [["t1r", true]], "an address with no live terminal drops out");
+  const plan = cleanupPlan(m, owners, pl, panesNow, terms, g, [{ top: "/wt/fix-login", head: "h7", branch: "fix-login" }], "mac");
+  assert.deepEqual(cleanupLines(plan), ["End pypi-source-diff", "Remove worktree /wt/fix-login and branch fix-login"],
+    "the PM lives on, and no line about the main checkout");
+  assert.equal(withShared([], undefined, pl).length, 0);
+  // Not while it's working.
+  const busy = agentPlaces(agentsNow, panesNow, [{ ...terms[0], status: "working" }]);
+  assert.match(cleanupPlan(m, withShared([], [{ address: "t1r" }], busy), busy, panesNow, terms, g, []).blocked, /still working/);
+});
+
 // The scripts, run for real against a throwaway repo.
 const hasGit = spawnSync("git", ["--version"]).status === 0;
 test("GIT_LOOK and CLEAN_WORKTREE against a real worktree", { skip: !hasGit }, () => {
@@ -314,6 +396,7 @@ test("GIT_LOOK and CLEAN_WORKTREE against a real worktree", { skip: !hasGit }, (
     assert.deepEqual(parseGitLook(sh(GIT_LOOK, join(wt)).stdout),
       { branch: "fix-login", remote, head, top: wt, linked: true });
     assert.equal(parseGitLook(sh(GIT_LOOK, repo).stdout).linked, false, "the main checkout");
+    assert.deepEqual(parseWorktrees(git(repo, ...WORKTREE_LIST)), [{ top: wt, head, branch: "fix-login" }]);
 
     // Refuses: a commit that wasn't merged, then an untracked file.
     git(wt, "commit", "-q", "--allow-empty", "-m", "more");

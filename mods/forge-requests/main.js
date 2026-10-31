@@ -6,8 +6,9 @@ import {
 import { forgeClient, projectOf, actionList, matches, runAction, describe, actionLabel, fill, ago, agoAt, openUrl } from "./lib.js";
 import { Chrome, button, chip, note, pill, staleError } from "./ui.js";
 import {
-  CI, defaultActions, mergeTip, checkoutOf, liveAgents, itemOf, agentPlaces, parseGitLook, ownersOf, askTarget, askText,
+  CI, defaultActions, mergeTip, checkoutOf, liveAgents, itemOf, agentPlaces, parseGitLook, ownersOf, withShared, askTarget, askText,
   GIT_LOOK, shownMerged, deployState, checkDue, cleanupPlan, cleanupLines, notDoneWhy, CLEAN_WORKTREE,
+  WORKTREE_LIST, parseWorktrees, leftoversOf,
   orderFacts, migrationPattern, clashText,
 } from "./requests.js";
 
@@ -32,6 +33,7 @@ const DEPLOY_EVERY = 60 * 1000;
 const ORDER_EVERY = 300;             // seconds: how far behind and changed files, per open request      // a deploy check that said "not yet" runs again after this
 const LOOK_EVERY = 60 * 1000;        // folders whose branch only git knows (sub-agents)
 const LOOK_EVERY_PANE = 10 * 60 * 1000;
+const WORKTREES_EVERY = 2 * 60 * 1000; // the checkout's worktrees, for ones merged work left behind
 
 export default class ForgeRequests extends View {
   init(_props, cx) {
@@ -56,6 +58,7 @@ export default class ForgeRequests extends View {
     this.checks = new Map();  // merge sha -> { state: "yes"|"no"|"error", text, at } from props.deploy
     this.checking = false;
     this.shownMerged = [];    // the merged rows on screen, from the last render
+    this.worktrees = { list: [], at: 0, folder: null, listing: false, machine: null }; // the checkout's linked worktrees (parseWorktrees)
     this.order = null;        // forge.py `order`: { requests: {iid: {...}}, targets }
     this.facts = new Map();   // orderFacts from the last render
     this.refresh(cx, -1, false); // whatever is cached, however old: draw at once
@@ -65,6 +68,7 @@ export default class ForgeRequests extends View {
       if (Date.now() - this.asked >= POLL * 1000) this.refresh(cx, POLL, false);
       else if (Date.now() - this.drawn >= 30000) cx.notify(); // keep the ages moving
       this.lookAtAgents(cx);
+      this.lookAtWorktrees(cx);
       this.checkDeploys(cx);
     });
   }
@@ -102,6 +106,37 @@ export default class ForgeRequests extends View {
       this.looking = false;
       cx.notify();
     });
+  }
+
+  // Lists the checkout's worktrees, so a merged request whose worker already exited still
+  // gets Clean up for the worktree it left. One git call on the forge machine, every couple
+  // of minutes while merged requests are listed.
+  lookAtWorktrees(cx) {
+    if (this.worktrees.listing || !this.merged.length || Date.now() - this.worktrees.at < WORKTREES_EVERY) return;
+    cx.spawn(async (cx) => {
+      await this.listWorktrees();
+      cx.notify();
+    });
+  }
+
+  // The git call itself; Clean up awaits it directly so its plan sees the current list.
+  async listWorktrees() {
+    const w = this.worktrees;
+    if (w.listing) return;
+    const p = props() ?? {};
+    const project = projectOf(p);
+    const folder = checkoutOf(p.folder, spaces(), project.on, project.repo);
+    if (!folder) { Object.assign(w, { list: [], at: Date.now() }); return; }
+    w.listing = true;
+    try {
+      const r = await exec("git", WORKTREE_LIST, { cwd: folder, on: project.on });
+      if (r.code === 0) Object.assign(w, { list: parseWorktrees(r.stdout), folder, machine: project.on ?? null });
+    } catch {
+      // Machine away: keep what we had, look again later.
+    } finally {
+      w.at = Date.now();
+      w.listing = false;
+    }
   }
 
   // Types into the agent that owns a request (hc send: as if you typed it and pressed Enter).
@@ -175,7 +210,9 @@ export default class ForgeRequests extends View {
     this.notice = null;
     cx.notify();
     cx.spawn(async (cx) => {
-      for (const o of owners) {
+      while (this.worktrees.listing) await cx.sleep(100);
+      await this.listWorktrees();
+      for (const o of owners.filter((x) => !x.shared)) {
         try {
           const r = await exec("sh", ["-c", GIT_LOOK], { cwd: o.cwd, on: o.machine });
           this.git.set(o.key, { ...parseGitLook(r.stdout), at: Date.now() });
@@ -183,10 +220,10 @@ export default class ForgeRequests extends View {
       }
       const places = this.places();
       const project = projectOf(props() ?? {});
-      const fresh = ownersOf(m, places, this.git, project);
+      const fresh = withShared(ownersOf(m, places, this.git, project), shared("forge.requestAgents")?.[m.url], places);
       let ps = [], ks = [];
       try { ps = panes(); ks = terminals(); } catch {}
-      const plan = cleanupPlan(m, fresh, places, ps, ks, this.git);
+      const plan = cleanupPlan(m, fresh, places, ps, ks, this.git, leftoversOf(m, this.worktrees.list), this.worktrees.machine ?? null);
       this.done(m.iid);
       if (plan.blocked) this.notice = { iid: m.iid, text: `Not yet: ${plan.blocked}.`, error: true };
       else if (!plan.tabs.length && !plan.kills.length && !plan.worktrees.length) this.notice = { iid: m.iid, text: "Nothing left to clean up.", error: false };
@@ -219,6 +256,7 @@ export default class ForgeRequests extends View {
           }
           for (const [key, g] of this.git) if (g.top === w.top) this.git.delete(key);
         }
+        if (plan.worktrees.length) this.worktrees.at = 0; // list them again on the next tick
       } catch (e) {
         failed.push(message(e));
       }
@@ -461,11 +499,11 @@ export default class ForgeRequests extends View {
   // A merged request: its CI and deploy, the agents still on it, and Clean up (on hover,
   // like the open rows' buttons): the solid button once it's deployed, else a plain one
   // whose confirm says what isn't done (a merge that never reached CI shouldn't strand its agent).
-  mergedRow(t, m, p, terms, now, owners, agentList) {
+  mergedRow(t, m, p, terms, now, owners, agentList, leftovers) {
     const st = deployState(m, p.deploy, this.checks, now);
     const busy = this.busy[m.iid];
     const hov = this.hovered === m.iid && !busy && this.confirming?.iid !== m.iid;
-    const canClean = hov && owners.length > 0;
+    const canClean = hov && (owners.length > 0 || leftovers.length > 0);
     const ci = m.ci && CI[m.ci.status] ? m : null;
     return v_flex().id(`mg-${m.iid}`).px(8).py(5).gap(3).rounded(6).cursor_pointer()
       .hover((s) => s.bg(t.hover))
@@ -481,10 +519,13 @@ export default class ForgeRequests extends View {
         .when(!ci && st.ci === "none", (e) => e.child(div().id(`noci-${m.iid}`).flex_none().text_size(11).text_color(t.dim)
           .tooltip(`No ${terms.ciRun} ran on the merge commit`).child("no CI")))
         .when(Boolean(p.deploy?.check), (e) => e.child(this.deployChip(t, m, p.deploy, st)))
+        .when(!owners.length && leftovers.length > 0 && !busy && !canClean, (e) => e.child(div().id(`left-${m.iid}`).flex_none()
+          .text_size(11).text_color(t.dim).tooltip(`Its worktree is still there: ${leftovers.map((w) => w.top).join(", ")}`)
+          .child(leftovers.length > 1 ? `${leftovers.length} worktrees` : "worktree")))
         .when(Boolean(busy), (e) => e.child(div().flex_none().text_size(11).text_color(t.muted).child(busy)))
         .when(canClean, (e) => e.child(button(t, `clean-${m.iid}`, "Clean up", (cx) => this.prepareCleanup(m, owners, cx), {
           tone: st.done ? "primary" : null,
-          tooltip: `${st.done ? "" : `Not deployed yet: ${notDoneWhy(st, p.deploy, terms)}. `}Ends the agents still on this branch and removes its worktree and local branch. Shows exactly what goes first; never touches uncommitted or unmerged work.`,
+          tooltip: `${st.done ? "" : `Not deployed yet: ${notDoneWhy(st, p.deploy, terms)}. `}Ends the agents still on this branch and removes its worktrees and local branch, including ones a finished agent left behind. Shows exactly what goes first; never touches uncommitted or unmerged work.`,
         }))))
       .when(this.confirming?.iid === m.iid && this.confirming.id === "cleanup", (e) => e.child(v_flex().gap(4).text_size(11.5)
         .children(cleanupLines(this.confirming.plan, notDoneWhy(st, p.deploy, terms)).map((l) => div()
@@ -595,7 +636,9 @@ export default class ForgeRequests extends View {
 
       // Merged lately: the last day's, and older ones an agent is still on.
       const now = Date.now();
-      const recent = shownMerged(this.merged, ownersOfReq, now);
+      const leftoversOfReq = (m) => leftoversOf(m, this.worktrees.list);
+      const cleanOwners = (m) => withShared(ownersOfReq(m), byUrl?.[m.url], places);
+      const recent = shownMerged(this.merged, cleanOwners, now, leftoversOfReq);
       this.shownMerged = recent;
 
       body = v_flex().id("rq-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
@@ -662,7 +705,7 @@ export default class ForgeRequests extends View {
             .child(div().text_color(t.dim).child(String(recent.length))))
           .when(!this.mergedFolded(repo), (e) => e
             .when(Boolean(this.mergedError), (e) => e.child(staleError(t, this.mergedError)))
-            .children(recent.map((m) => this.mergedRow(t, m, p, terms, now, ownersOfReq(m), agentsOf(m))))));
+            .children(recent.map((m) => this.mergedRow(t, m, p, terms, now, cleanOwners(m), agentsOf(m), leftoversOfReq(m))))));
     }
 
     return v_flex().id("requests").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
