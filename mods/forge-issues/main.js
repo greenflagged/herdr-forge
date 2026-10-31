@@ -21,6 +21,7 @@ import {
 //   scopeSep: "::"                     the scoped-label separator (default: the forge's)
 //   triage: true | { agent, task, tab } the optional triage agent (off by default)
 //   issue: 123                         open this issue at once (a link into the tab from another mod)
+//   view: { state, sort, picked, q }   where the list starts, e.g. { picked: { "scope:type": ["bug"] } }
 // Keys on the list: ↑/↓ or j/k move the selection, / searches, Esc clears the search,
 // Enter opens the selected issue in the browser.
 // forge.py keeps the issues in SQLite on `on` and does the filtering, counting and
@@ -67,10 +68,12 @@ export default class Issues extends View {
     this.syncing = false;
     this.seq = 0;                // newest list query; older answers are dropped
     this.paging = false;
-    this.state = "opened";
-    this.sort = "priority";
-    this.picked = {};            // group -> [values] (OR within, AND across)
-    this.query = "";
+    // props.view: where the list starts ("my open bugs"); the person changes it from there.
+    const view = props()?.view ?? {};
+    this.state = ["opened", "closed", "all"].includes(view.state) ? view.state : "opened";
+    this.sort = ["priority", "updated", "created", "triage"].includes(view.sort) ? view.sort : "priority";
+    this.picked = view.picked && typeof view.picked === "object" ? { ...view.picked } : {}; // group -> [values] (OR within, AND across)
+    this.query = typeof view.q === "string" ? view.q : "";
     this.selected = null;
     this.detail = null;          // show() of the selected issue
     this.detailError = null;
@@ -91,6 +94,7 @@ export default class Issues extends View {
     const { terms } = this.project();
     this.forge = forgeClient({ exec, readTextFile }, `${appHome()}/mods/${MOD}/forge.py`);
     this.input = InputState.new({ placeholder: "Search issues (title, text, #iid)" });
+    if (this.query) this.input.set_value(this.query);
     this.input.on("change", () => { this.typedAt = Date.now(); this.pendingQuery = this.input.value().trim(); });
     this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx?.notify(); });
     this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx?.notify(); });
