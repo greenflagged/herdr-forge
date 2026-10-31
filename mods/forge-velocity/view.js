@@ -67,7 +67,7 @@ export function prepare(commits, velocity, terms, forge, range) {
       rows.push(prepRow(k, byKey[k], styles[k], n, byKey[k]?.unit ?? (k === "cycle" ? "duration" : undefined)));
     }
   }
-  return { n, size: b?.size ?? null, start: b?.start ?? null, rows };
+  return { n, size: b?.size ?? null, start: b?.start ?? null, edges: b?.edges ?? null, rows };
 }
 
 export function day(ms) {
@@ -75,10 +75,25 @@ export function day(ms) {
   return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 }
 
-// One bucket's name, for the caption while the pointer is on it.
-export function bucketLabel(i, { n, size, start }) {
-  if (start == null || size == null) return "";
-  const a = start + i * size;
-  if (size === DAY) return i === n - 1 ? "Today" : `${DAYS[new Date(a).getDay()]} ${day(a)}`;
-  return `${day(a)} – ${day(a + size - 1)}`;
+// Where bucket i starts and ends. forge.py sends `edges` (days across a DST change last
+// 23 or 25 hours); an answer without them has equal buckets.
+function bounds(i, { size, start, edges }) {
+  const a = edges?.[i] ?? start + i * size;
+  return [a, edges?.[i + 1] ?? a + size];
+}
+
+// One bucket's name, for the caption while the pointer is on it. Days are the viewer's,
+// named from their middle, so an hour of DST either way can't name the day before.
+export function bucketLabel(i, v) {
+  if (v.start == null || v.size == null) return "";
+  const [a, b] = bounds(i, v), mid = (a + b) / 2;
+  if (v.size === DAY) return i === v.n - 1 ? "Today" : `${DAYS[new Date(mid).getDay()]} ${day(mid)}`;
+  return `${day(a)} – ${day(b - 1)}`;
+}
+
+// The chart's first day, under its left edge.
+export function rangeStart(v) {
+  if (v.start == null || v.size == null) return "";
+  const [a, b] = bounds(0, v);
+  return day(v.size === DAY ? (a + b) / 2 : a);
 }

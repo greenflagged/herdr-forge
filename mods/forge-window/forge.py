@@ -9,7 +9,7 @@
 # and drop the cached answers they change. A rate limit pauses every project on that host.
 #
 #   python3 -I forge.py <command> <provider> <host> <owner/project> [args...]
-#   python3 -I forge.py commits <top> <ref> <range> <now_ms> <tz_offset_min> <force 0|1>
+#   python3 -I forge.py commits <top> <ref> <range> <now_ms> <tz> <force 0|1>   (tz: see buckets())
 #   python3 -I forge.py skill <status|install> <name> <text>
 #   python3 -I forge.py version
 #
@@ -17,11 +17,11 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+294743f85c9c"
+VERSION = "0.1.0+9dae2a34b9c2"
 
-import json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
+import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # The cache holds issue text and comments, some of them private: nothing we write is
 # readable by other users of the machine.
@@ -169,22 +169,36 @@ def _connect(path, migrations):
 # ---- velocity buckets (shared by the project's requests/issues and the repo's commits) ----
 
 def buckets(rng, now_ms, tz):
-    """(n, size, start): 30 calendar days ending today in the viewer's time zone
-    (tz = JS getTimezoneOffset(), minutes), or 12 rolling weeks ending now."""
+    """(n, size, start, edges): 30 calendar days ending today in the viewer's time zone,
+    or 12 rolling weeks ending now. Bucket i is [edges[i], edges[i+1]).
+
+    tz is JS getTimezoneOffset() in minutes, as text: the offset now, then optionally
+    the offset at each of the 31 local midnights the days start and end on (oldest
+    first), so days across a DST change still run midnight to midnight (23 or 25 hours).
+    With the offset alone every midnight uses it."""
+    offs = [int(x) for x in str(tz).split(",")]
     if rng == "30d":
-        local = now_ms - tz * 60000
-        end = (local // DAY + 1) * DAY + tz * 60000
-        return 30, DAY, end - 30 * DAY
-    return 12, 7 * DAY, now_ms - 84 * DAY
+        n = 30
+        today = (now_ms - offs[0] * 60000) // DAY
+        at = offs[1:] if len(offs) == n + 2 else [offs[0]] * (n + 1)
+        edges = [(today - n + 1 + i) * DAY + at[i] * 60000 for i in range(n + 1)]
+        return n, DAY, edges[0], edges
+    start = now_ms - 84 * DAY
+    return 12, 7 * DAY, start, [start + i * 7 * DAY for i in range(13)]
+
+
+def bucket_of(t, b):
+    """The bucket index t falls in, or None."""
+    i = bisect.bisect_right(b[3], t) - 1
+    return i if 0 <= i < b[0] else None
 
 
 def count_row(key, times, b, now_ms):
-    n, size, start = b
-    values = [0] * n
+    values = [0] * b[0]
     for t in times:
-        i = (t - start) // size
-        if 0 <= i < n:
-            values[int(i)] += 1
+        i = bucket_of(t, b)
+        if i is not None:
+            values[i] += 1
     week, all_ = now_ms - 7 * DAY, now_ms - 84 * DAY
     return {"key": key, "values": values,
             "now": sum(1 for t in times if t >= week),
@@ -193,12 +207,11 @@ def count_row(key, times, b, now_ms):
 
 def cycle_row(key, pairs, b, now_ms):
     """pairs: (merged_ms, created_ms). Median time to merge per bucket, in ms."""
-    n, size, start = b
-    per = [[] for _ in range(n)]
+    per = [[] for _ in range(b[0])]
     for m, c in pairs:
-        i = (m - start) // size
-        if 0 <= i < n:
-            per[int(i)].append(m - c)
+        i = bucket_of(m, b)
+        if i is not None:
+            per[i].append(m - c)
     week, all_ = now_ms - 7 * DAY, now_ms - 84 * DAY
     return {"key": key, "unit": "duration", "lowerBetter": True, "values": [median(x) for x in per],
             "now": median([m - c for m, c in pairs if m >= week]),
@@ -536,8 +549,15 @@ def gh_status(status, conclusion):
 
 
 def gh_day(iso):
-    """A GitHub due date ("2026-11-01T07:00:00Z") as "YYYY-MM-DD"."""
-    return iso[:10] if iso else None
+    """A GitHub due date as "YYYY-MM-DD". GitHub keeps it as a midnight somewhere: new
+    ones at 00:00Z, older ones at the setter's midnight (07:00Z in California, but
+    21:00Z the day before east of UTC: nodejs/node's 4.0.0 milestone). The nearest UTC
+    midnight is the date that was picked, for any zone from UTC-11 to UTC+12; cutting
+    the text would show a day early east of UTC."""
+    if not iso:
+        return None
+    t = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+    return (t + timedelta(hours=12)).strftime("%Y-%m-%d")
 
 
 def gh_since(iso):
@@ -1179,7 +1199,7 @@ class Project:
         b = buckets(rng, now_ms, tz)
         pairs = self.db.execute("SELECT merged_ms, created_ms FROM merged").fetchall()
         closed = [r[0] for r in self.db.execute("SELECT closed_ms FROM closed")]
-        out = {"n": b[0], "size": b[1], "start": b[2], "at": self.meta("velocity_at", 0), "error": err, "rows": [
+        out = {"n": b[0], "size": b[1], "start": b[2], "edges": b[3], "at": self.meta("velocity_at", 0), "error": err, "rows": [
             count_row("merged", [m for m, _ in pairs], b, now_ms),
             count_row("closed", closed, b, now_ms),
             cycle_row("cycle", pairs, b, now_ms),
@@ -1419,7 +1439,8 @@ class Project:
                                "FROM issues WHERE state='opened' ORDER BY iid").fetchall()
         now = time.time() * 1000
         days = lambda iso: int((now - ms(iso)) / DAY)
-        synced = datetime.fromtimestamp(self.meta("last_sync", 0)).isoformat(timespec="minutes")
+        # With its UTC offset, so an agent reading it doesn't take this machine's clock for UTC.
+        synced = datetime.fromtimestamp(self.meta("last_sync", 0)).astimezone().isoformat(timespec="minutes")
         # Everything from the forge below is written by anyone who can open an issue, and an
         # agent reads it: one plain line per field, nothing that could forge our markers.
         clean = lambda s: re.sub(r"<{3,}|>{3,}", "", one_line(s) or "")
@@ -1576,7 +1597,7 @@ def commits(top, ref, rng, now_ms, tz, force):
     db.execute("DELETE FROM commits WHERE at < ? AND fetched < ?", (now - 30 * 86400, now - 30 * 86400))
     db.commit()
     b = buckets(rng, now_ms, tz)
-    return {"n": b[0], "size": b[1], "start": b[2], "at": at, "error": error,
+    return {"n": b[0], "size": b[1], "start": b[2], "edges": b[3], "at": at, "error": error,
             "row": count_row("commits", times, b, now_ms), "total": len(times)}
 
 
@@ -1636,7 +1657,7 @@ def main(argv):
     private_home()
     if cmd == "commits":
         top, ref, rng, now_ms, tz, force = args
-        return commits(top, ref, rng, int(now_ms), int(tz), force == "1")
+        return commits(top, ref, rng, int(now_ms), tz, force == "1")
     if cmd == "skill":
         return skill(*args)
     provider, host, repo, *a = args
@@ -1652,7 +1673,7 @@ def main(argv):
         "runners": lambda: p.runners(age(0), force(1)),
         "milestones": lambda: p.milestones(age(0), force(1)),
         "milestone-items": lambda: p.milestone_items(a[0], age(1), force(2)),
-        "velocity": lambda: p.velocity(age(0), force(1), a[2], int(a[3]), int(a[4])),
+        "velocity": lambda: p.velocity(age(0), force(1), a[2], int(a[3]), a[4]),
         "sync": lambda: p.sync(float(a[0]) if a else 0, force(1)),
         "meta": p.labels_meta,
         "query": lambda: p.query(json.loads(a[0]) if a else {}),
