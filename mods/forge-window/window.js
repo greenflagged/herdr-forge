@@ -44,7 +44,9 @@ export function forgeLayout(project, hidden = [], config = {}) {
     content: { mod: p.mod, props: { ...props, ...(own[p.name] ?? {}) } },
   });
   const shown = PANELS.filter((p) => !hidden.includes(p.name));
-  const propsOf = (p) => p.name === "velocity" ? { glabOn: base.on, forges: config.forges }
+  // Velocity gets the project's checkout too, so it shows this project rather than the
+  // focused terminal's (without a folder it follows focus).
+  const propsOf = (p) => p.name === "velocity" ? { ...base, folder: project.folder ?? null, glabOn: base.on, forges: config.forges }
     : p.name === "requests" || p.name === "issues" ? { ...base, folder: project.folder ?? null } : base;
   const left = shown.filter((p) => p.side === "left");
   const row = [];

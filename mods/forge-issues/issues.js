@@ -122,6 +122,24 @@ export function togglePick(picked, group, value) {
   return { ...picked, [group]: vals.includes(value) ? vals.filter((v) => v !== value) : [...vals, value] };
 }
 
+// props.view, checked: { state, sort, picked, q } with anything malformed at its default.
+// picked keeps only groups whose values are a list of strings (the layout is hand-written).
+export function startView(view) {
+  const v = view && typeof view === "object" && !Array.isArray(view) ? view : {};
+  const picked = {};
+  if (v.picked && typeof v.picked === "object" && !Array.isArray(v.picked)) {
+    for (const [g, vals] of Object.entries(v.picked)) {
+      if (Array.isArray(vals) && vals.every((x) => typeof x === "string")) picked[g] = [...vals];
+    }
+  }
+  return {
+    state: STATES.some((s) => s.id === v.state) ? v.state : "opened",
+    sort: SORTS.some((s) => s.id === v.sort) ? v.sort : "priority",
+    picked,
+    q: typeof v.q === "string" ? v.q : "",
+  };
+}
+
 // The JSON `query` takes. `sep` only when props set one (passing it makes forge.py
 // remember it for the project).
 export function listQuery({ state, q, picked, sort, offset, limit, sep }) {
