@@ -4,7 +4,7 @@ import { actionLabel, actionList, describe, fill, matches, projectOf, requestIte
 import {
   CI, checkoutOf, defaultActions, itemOf, liveAgents, mergeTip, agentPlaces, parseGitLook, ownersOf, askTarget, askText, machineOf,
   shownMerged, deployState, checkDue, cleanupPlan, cleanupLines, notDoneWhy, CLEAN_WORKTREE, GIT_LOOK, RECENT,
-  MIGRATIONS, migrationPattern, migrationsOf, orderFacts, clashText,
+  MIGRATIONS, migrationPattern, migrationsOf, orderFacts, clashText, versionKey,
 } from "../mods/forge-requests/requests.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, existsSync, rmSync, realpathSync } from "node:fs";
@@ -344,11 +344,16 @@ const orderOf = (requests, targets = []) => ({ requests, targets });
 
 test("migrationsOf reads Flyway versions; the pattern can change or be off", () => {
   assert.deepEqual(migrationsOf([`${D}/V12__add.sql`, "src/V3__x.kt", "V7__top.sql"], MIGRATIONS), [
-    { path: `${D}/V12__add.sql`, folder: D, name: "V12__add.sql", version: 12 },
-    { path: "V7__top.sql", folder: "", name: "V7__top.sql", version: 7 }]);
+    { path: `${D}/V12__add.sql`, folder: D, name: "V12__add.sql", version: "12" },
+    { path: "V7__top.sql", folder: "", name: "V7__top.sql", version: "7" }]);
   assert.equal(migrationPattern(undefined), MIGRATIONS);
   assert.equal(migrationPattern(false), null);
-  assert.deepEqual(migrationsOf(["migrations/0042_add.py"], migrationPattern("(\\d{4})_\\w+\\.py$")).map((m) => m.version), [42]);
+  assert.deepEqual(migrationsOf(["migrations/0042_add.py"], migrationPattern("(\\d{4})_\\w+\\.py$")).map((m) => m.version), ["42"]);
+  // Dotted versions, compared as Flyway does.
+  assert.deepEqual(migrationsOf([`${D}/V1.2__a.sql`, `${D}/V1_02__b.sql`, `${D}/V1.2.0__c.sql`, `${D}/V1.20__d.sql`, `${D}/V2.1.3__e.sql`], MIGRATIONS)
+    .map((m) => m.version), ["1.2", "1.2", "1.2", "1.20", "2.1.3"]);
+  assert.deepEqual(migrationsOf([`${D}/R__view.sql`, `${D}/U3__undo.sql`, `${D}/V1.__x.sql`], MIGRATIONS), [], "repeatable, undo and malformed aren't versions");
+  assert.deepEqual(["10", "1_0", "0.0", "007.1"].map(versionKey), ["10", "1", "0", "7.1"]);
   assert.deepEqual(migrationsOf(["a"], "(("), [], "a bad pattern is no migrations");
 });
 
@@ -367,9 +372,9 @@ test("orderFacts finds overlaps and clashing migration numbers, and picks who go
   }, [{ ref: "main", folder: D, files: ["V7__x.sql", "V8__taken.sql"] }]);
   const f = orderFacts(reqs, order, MIGRATIONS);
   assert.deepEqual(f.get(1).overlaps, [{ iid: 2, files: ["src/a.kt"] }]);
-  assert.deepEqual(f.get(1).clashes, [{ version: 9, name: "V9__one.sql", by: 3 }]);
-  assert.deepEqual(f.get(3).clashes, [{ version: 9, name: "V9__three.sql", by: 1 }]);
-  assert.deepEqual(f.get(4).clashes, [{ version: 8, name: "V8__four.sql", by: "target" }]);
+  assert.deepEqual(f.get(1).clashes, [{ version: "9", name: "V9__one.sql", by: 3 }]);
+  assert.deepEqual(f.get(3).clashes, [{ version: "9", name: "V9__three.sql", by: 1 }]);
+  assert.deepEqual(f.get(4).clashes, [{ version: "8", name: "V8__four.sql", by: "target" }]);
   // 1, 2 and 3 are one group: 3 is green and current, 2 must rebase, 1's CI still runs.
   assert.deepEqual([1, 2, 3].map((i) => [f.get(i).next, f.get(i).after]), [[false, 3], [false, 3], [true, null]]);
   assert.deepEqual([f.get(4).next, f.get(4).after], [false, null], "alone: no order to suggest");
@@ -395,4 +400,15 @@ test("itemOf, clashText and askText say what a rebase must also do", () => {
   assert.match(task, /2\. Renumber the migration/);
   assert.doesNotMatch(task, /\{\w+\}/, "every placeholder filled");
   assert.match(fill(rebase.task, itemOf(request(), project, { rebase: true, clashes: [] })), /2\. If you add a database migration/);
+});
+
+test("orderFacts: dotted versions clash with their equals on the target and in other requests", () => {
+  const reqs = [request({ iid: 1 }), request({ iid: 2 })];
+  const order = orderOf({
+    1: { behind: 0, rebase: false, files: [`${D}/V1_2__one.sql`, `${D}/V3.1__mine.sql`] },
+    2: { behind: 0, rebase: false, files: [`${D}/V1.2.0__two.sql`] },
+  }, [{ ref: "main", folder: D, files: ["V3.01__theirs.sql", "V3.10__other.sql"] }]);
+  const f = orderFacts(reqs, order, MIGRATIONS);
+  assert.deepEqual(f.get(1).clashes, [{ version: "1.2", name: "V1_2__one.sql", by: 2 }, { version: "3.1", name: "V3.1__mine.sql", by: "target" }]);
+  assert.deepEqual(f.get(2).clashes, [{ version: "1.2", name: "V1.2.0__two.sql", by: 1 }]);
 });

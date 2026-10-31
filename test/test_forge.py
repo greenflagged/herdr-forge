@@ -114,7 +114,7 @@ class Forge(unittest.TestCase):
             [r"repository/tree\?path=db%2Fmigration&ref=main", {"out": [
                 {"name": "V4__x.sql", "type": "blob"}, {"name": "sub", "type": "tree"}]}],
         ])
-        out = self.run_forge("order", *P, 60, 0, r"(^|/)V(\d+)__[^/]*\.sql$")
+        out = self.run_forge("order", *P, 60, 0, r"(^|/)V(\d+(?:[._]\d+)*)__[^/]*\.sql$")
         self.assertIsNone(out["error"])
         a, b = out["requests"]["7"], out["requests"]["8"]
         self.assertEqual((a["behind"], a["rebase"], a["files"]), (0, False, [f"{mig}/V5__a.sql"]))
@@ -123,7 +123,7 @@ class Forge(unittest.TestCase):
         self.assertEqual(out["targets"], [{"ref": "main", "folder": mig, "files": ["V4__x.sql"]}])
         # Same heads: files aren't asked for again.
         n = sum("diffs" in c for c in self.calls())
-        self.run_forge("order", *P, 60, 1, r"(^|/)V(\d+)__[^/]*\.sql$")
+        self.run_forge("order", *P, 60, 1, r"(^|/)V(\d+(?:[._]\d+)*)__[^/]*\.sql$")
         self.assertEqual(sum("diffs" in c for c in self.calls()), n)
         self.assertEqual(sum(c.endswith("projects/acme%2Fshop") for c in self.calls()), 1, "merge method asked once a day")
 

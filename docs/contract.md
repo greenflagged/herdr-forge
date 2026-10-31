@@ -38,7 +38,9 @@ and `npm test` fails when one is out of date. Machines that run forge.py must be
   and `forge-issues` only.
 - `actions`: see [actions.md](actions.md). `forge-requests` and `forge-issues` only.
 - `migrations`: `forge-requests` only. A pattern (Python and JS regex alike) for migration file
-  paths whose last all-digit group is the version; default `(^|/)V(\d+)__[^/]*\.sql$` (Flyway);
+  paths whose last group of digits (dots or underscores between them allowed) is the version;
+  default `(^|/)V(\d+(?:[._]\d+)*)__[^/]*\.sql$` (Flyway, dotted versions too). Versions compare
+  as Flyway does: `1_02_0` is `1.2`;
   `false` for none.
 - `deploy`: `{ label?, check }`, `forge-requests` only. `check` is run as `sh -c check sh <merge sha>`
   in `folder` on `on`: exit 0 deployed, 1 not yet, anything else the check failed (its first

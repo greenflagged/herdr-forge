@@ -329,9 +329,17 @@ echo "removed $wt and $br"`;
 // request adds a migration to. From that: which requests touch the same files, which
 // migration numbers clash, and who should merge first where it matters.
 
-// Flyway-style migrations (V12__name.sql) by default; props.migrations: a pattern whose
-// last all-digit group is the number, or false for none.
-export const MIGRATIONS = "(^|/)V(\\d+)__[^/]*\\.sql$";
+// Flyway-style migrations by default: V12__name.sql, or dotted V1.2__ / V1_2__.
+// props.migrations: a pattern whose last group of digits (dots or underscores between
+// them allowed) is the version, or false for none.
+export const MIGRATIONS = "(^|/)V(\\d+(?:[._]\\d+)*)__[^/]*\\.sql$";
+
+// A version as Flyway compares it: "1_02_0" and "1.2" are both "1.2".
+export function versionKey(v) {
+  const parts = String(v).split(/[._]/).map((p) => String(Number(p)));
+  while (parts.length > 1 && parts[parts.length - 1] === "0") parts.pop();
+  return parts.join(".");
+}
 export function migrationPattern(prop) {
   if (prop === false || prop === "") return null;
   return typeof prop === "string" ? prop : MIGRATIONS;
@@ -346,10 +354,10 @@ export function migrationsOf(files, pattern) {
   for (const path of files ?? []) {
     const m = rx.exec(path);
     if (!m) continue;
-    const version = [...m].slice(1).reverse().find((g) => g != null && /^\d+$/.test(g));
+    const version = [...m].slice(1).reverse().find((g) => g != null && /^\d+(?:[._]\d+)*$/.test(g));
     if (version == null) continue;
     const i = path.lastIndexOf("/");
-    out.push({ path, folder: i >= 0 ? path.slice(0, i) : "", name: path.slice(i + 1), version: Number(version) });
+    out.push({ path, folder: i >= 0 ? path.slice(0, i) : "", name: path.slice(i + 1), version: versionKey(version) });
   }
   return out;
 }
