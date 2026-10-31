@@ -8,11 +8,14 @@ import { Chrome, button, chip, note, pill, staleError } from "./ui.js";
 import {
   CI, defaultActions, mergeTip, checkoutOf, liveAgents, itemOf, agentPlaces, parseGitLook, ownersOf, askTarget, askText,
   GIT_LOOK, shownMerged, deployState, checkDue, cleanupPlan, cleanupLines, notDoneWhy, CLEAN_WORKTREE,
+  orderFacts, migrationPattern, clashText,
 } from "./requests.js";
 
 // Open merge requests (GitLab) / pull requests (GitHub) for one project, through forge.py,
 // then the ones merged lately: did they deploy, and Clean up their agents and worktrees.
-// props: { repo, on?, provider?, host?, folder?, actions?, deploy? } (docs/contract.md, docs/actions.md)
+// Each open one also shows where it stands against the others: behind its target, the
+// same files as another, a migration number someone else took, and who should merge first.
+// props: { repo, on?, provider?, host?, folder?, actions?, deploy?, migrations? } (docs/contract.md, docs/actions.md)
 // forge.py runs on `on` (where glab or gh is logged in); links open in this computer's browser.
 
 const MOD = "forge-requests";
@@ -25,7 +28,8 @@ const message = (e) => String(e?.message ?? e);
 
 // Each agent folder's branch and remote (GIT_LOOK), looked up with git on the agent's machine.
 // A folder whose pane reports its branch only needs the remote, which rarely changes.
-const DEPLOY_EVERY = 60 * 1000;      // a deploy check that said "not yet" runs again after this
+const DEPLOY_EVERY = 60 * 1000;
+const ORDER_EVERY = 300;             // seconds: how far behind and changed files, per open request      // a deploy check that said "not yet" runs again after this
 const LOOK_EVERY = 60 * 1000;        // folders whose branch only git knows (sub-agents)
 const LOOK_EVERY_PANE = 10 * 60 * 1000;
 
@@ -52,6 +56,8 @@ export default class ForgeRequests extends View {
     this.checks = new Map();  // merge sha -> { state: "yes"|"no"|"error", text, at } from props.deploy
     this.checking = false;
     this.shownMerged = [];    // the merged rows on screen, from the last render
+    this.order = null;        // forge.py `order`: { requests: {iid: {...}}, targets }
+    this.facts = new Map();   // orderFacts from the last render
     this.refresh(cx, -1, false); // whatever is cached, however old: draw at once
     // Only while on screen and not collapsed; showing it again asks at once if it's due.
     cx.timer.every(1000, (cx) => {
@@ -107,7 +113,7 @@ export default class ForgeRequests extends View {
     cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const out = await exec("hc", ["send", target.address, askText(kind, r, terms)]);
+        const out = await exec("hc", ["send", target.address, askText(kind, r, terms, this.clashOf(r))]);
         if (out?.code) throw new Error((out.stderr || out.stdout || `hc send failed (${out.code})`).trim());
         this.notice = { iid: r.iid, text: `Asked ${target.name}`, error: false };
       } catch (e) {
@@ -147,6 +153,11 @@ export default class ForgeRequests extends View {
         }
         const was = this.checks.get(m.merge_sha)?.state;
         this.checks.set(m.merge_sha, { ...res, at: Date.now() });
+        if (res.state === "yes") {
+          // Remembered on the forge machine, so a restart (or another window) doesn't check again.
+          const { provider, host, repo } = project;
+          try { await this.forge(["deployed", provider, host, repo, m.merge_sha, res.text ?? ""], { on: project.on }); } catch {}
+        }
         if (res.state === "yes" && was && was !== "yes") {
           const { terms } = projectOf(p);
           try { notify({ title: `Deployed · ${terms.reqPrefix}${m.iid}`, body: m.title ?? "", level: "success" }); } catch {}
@@ -219,6 +230,39 @@ export default class ForgeRequests extends View {
     });
   }
 
+  // Where r stands against the others, as small chips under its row: behind its target,
+  // taken migration numbers, the same files as another request, and who merges first.
+  // null when there's nothing to say.
+  orderChips(t, r, terms) {
+    const f = this.facts.get(r.iid);
+    if (!f) return null;
+    const ref = (iid) => `${terms.reqPrefix}${iid}`;
+    const out = [];
+    const tag = (id, text, color, tip) => out.push(div().id(`ord-${r.iid}-${id}`).flex_none().px(5).rounded(4)
+      .border_1().border_color(t.border).text_size(10.5).text_color(color).tooltip(tip).child(text));
+    if (f.next) tag("next", "merge first", t.accent,
+      `It touches the same things as ${[...new Set([...f.overlaps.map((o) => o.iid), ...f.clashes.map((c) => c.by)].filter((x) => x !== "target"))].map(ref).join(", ")}, and it's the readiest of them: merge it first, then rebase the others.`);
+    if (f.after != null) tag("after", `after ${ref(f.after)}`, t.muted, `Merge ${ref(f.after)} first: it's readier, and this one shares files or a migration number with it.`);
+    if (f.behind > 0) tag("behind", `${f.behind} behind`, f.rebase ? t.ansi3 ?? t.working : t.dim,
+      f.rebase ? `${f.behind} commit${f.behind === 1 ? "" : "s"} behind ${r.target ?? "the target"}: it has to be rebased before it can merge.`
+        : `${f.behind} commit${f.behind === 1 ? "" : "s"} behind ${r.target ?? "the target"}. That doesn't block merging here.`);
+    for (const v of [...new Set(f.clashes.map((c) => c.version))]) {
+      const by = f.clashes.filter((c) => c.version === v).map((c) => (c.by === "target" ? r.target ?? "the target" : ref(c.by)));
+      tag(`v${v}`, `V${v} taken`, t.ansi1, `Its migration number ${v} is also used by ${by.join(" and ")}. Renumber it when rebasing.`);
+    }
+    if (f.overlaps.length) {
+      const files = [...new Set(f.overlaps.flatMap((o) => o.files))];
+      tag("overlap", f.overlaps.length === 1 ? `overlaps ${ref(f.overlaps[0].iid)}` : `overlaps ${f.overlaps.length}`, t.muted,
+        `Same files as ${f.overlaps.map((o) => ref(o.iid)).join(", ")}: ${files.slice(0, 6).join(", ")}${files.length > 6 ? ` and ${files.length - 6} more` : ""}`);
+    }
+    return out.length ? h_flex().gap(4).items_center().flex_wrap().children(out) : null;
+  }
+
+  // What a rebase of r must also do about clashing migrations ("" when nothing).
+  clashOf(r) {
+    return clashText(this.facts.get(r.iid)?.clashes ?? [], projectOf(props() ?? {}).terms);
+  }
+
   refresh(cx, maxAge, force) {
     const { provider, host, repo, on } = projectOf(props() ?? {});
     if (!provider || !repo) return;
@@ -242,10 +286,26 @@ export default class ForgeRequests extends View {
       cx.notify();
       try {
         const out = await this.forge(["merged", provider, host, repo, maxAge, force ? 1 : 0], { on });
-        if (Array.isArray(out?.merged)) this.merged = out.merged;
+        if (Array.isArray(out?.merged)) {
+          this.merged = out.merged;
+          // Confirmed before (by this window or another): final, no need to check again.
+          for (const m of this.merged) {
+            if (m.deployed && m.merge_sha) this.checks.set(m.merge_sha, { state: "yes", text: m.deployed.text || null, at: m.deployed.at_ms });
+          }
+        }
         this.mergedError = out?.error ?? null;
       } catch (e) {
         this.mergedError = message(e);
+      }
+      cx.notify();
+      // Less often than the list: one call per open request. Errors keep the last answer
+      // quietly; the chips are hints, the list above still says what's wrong.
+      try {
+        const age = maxAge < 0 ? -1 : Math.max(maxAge, ORDER_EVERY);
+        const pattern = migrationPattern((props() ?? {}).migrations) ?? "";
+        const out = await this.forge(["order", provider, host, repo, age, force ? 1 : 0, pattern], { on });
+        if (out?.requests) this.order = out;
+      } catch {
       } finally {
         this.loading = false;
         const again = this.again;
@@ -308,7 +368,7 @@ export default class ForgeRequests extends View {
     cx.spawn(async (cx) => {
       try {
         if (agent && !folder) throw new Error("No checkout of the repo found (set props.folder).");
-        const res = await runAction(a, itemOf(r, project), { on: project.on, folder },
+        const res = await runAction(a, itemOf(r, project, this.facts.get(r.iid)), { on: project.on, folder },
           { exec, run, spaces, knownAgents, openOverlay });
         if (res?.text) this.notice = { iid: r.iid, text: res.text, error: false };
         this.toast(r, a.label, { text: res?.text || (agent ? "Agent started" : "Done"), error: false });
@@ -465,6 +525,8 @@ export default class ForgeRequests extends View {
       body = this.error ? note(t, this.error, { error: true })
         : note(t, this.loading ? "Loading…" : `No open ${terms.requests.toLowerCase()}.`);
     } else {
+      // Where each request stands against the others (cheap: a few small lists).
+      this.facts = orderFacts(this.requests, this.order, migrationPattern(p.migrations));
       // Only the hovered row shows buttons, so only it needs the actions worked out.
       const hov = this.hovered != null ? this.requests.find((r) => r.iid === this.hovered) : null;
       // Agents already working on each request: on its branch, in a checkout of this project.
@@ -476,14 +538,14 @@ export default class ForgeRequests extends View {
       };
       let hovActions = [], hovAsk = null;
       if (hov && !this.busy[hov.iid] && this.confirming?.iid !== hov.iid) {
-        const item = itemOf(hov, project);
+        const item = itemOf(hov, project, this.facts.get(hov.iid));
         hovActions = actionList(p.actions, defaultActions(terms), shared(`${MOD}.actions`)).filter((a) => matches(a.when, item));
         // An agent owns it: ask that agent instead of starting another one. Not while it
         // shows a prompt: typed text would answer the prompt.
         const target = askTarget(ownersOfReq(hov), places);
         if (target) {
-          hovActions = hovActions.filter((a) => a.id !== "ship" && a.id !== "resolve");
-          if (target.status !== "blocked") hovAsk = { target, kind: hov.conflicts ? "conflicts" : "merge" };
+          hovActions = hovActions.filter((a) => a.id !== "ship" && a.id !== "resolve" && a.id !== "rebase");
+          if (target.status !== "blocked") hovAsk = { target, kind: hov.conflicts ? "conflicts" : item.needs_rebase ? "rebase" : "merge" };
         }
       }
       // Agents per request (forge.requestAgents), with live status: the maps once per render.
@@ -514,13 +576,13 @@ export default class ForgeRequests extends View {
           // Says exactly what will be typed into which agent.
           return v_flex().gap(4).text_size(11.5)
             .child(div().text_color(t.foreground).child(`Send to ${c.target.name}:`))
-            .child(div().px(6).py(4).rounded(4).bg(t.raised).text_color(t.muted).child(askText(c.kind, r, terms)))
+            .child(div().px(6).py(4).rounded(4).bg(t.raised).text_color(t.muted).child(askText(c.kind, r, terms, this.clashOf(r))))
             .child(h_flex().gap(6).justify_end()
               .child(button(t, `cancel-${r.iid}`, "Cancel", (cx) => { this.confirming = null; cx.notify(); }))
               .child(button(t, `yes-${r.iid}`, "Send", (cx) => this.ask(c.target, c.kind, r, cx), { tone: "primary" })));
         }
         const a = c.id === "merge" ? null : actionById(c.id);
-        const question = c.id === "merge" ? `Merge into ${r.target ?? "target"}?` : fill(a?.confirm ?? "", itemOf(r, project));
+        const question = c.id === "merge" ? `Merge into ${r.target ?? "target"}?` : fill(a?.confirm ?? "", itemOf(r, project, this.facts.get(r.iid)));
         return h_flex().gap(6).items_center().text_size(11.5)
           .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(question))
           .child(button(t, `cancel-${r.iid}`, "Cancel", (cx) => { this.confirming = null; cx.notify(); }))
@@ -542,6 +604,7 @@ export default class ForgeRequests extends View {
           .child(`No open ${terms.requests.toLowerCase()}.`)))
         .children(this.requests.map((r) => {
           const busy = this.busy[r.iid];
+          const chips = this.orderChips(t, r, terms);
           const shown = hov === r ? hovActions : [];
           const mergeable = hov === r && !busy && this.confirming?.iid !== r.iid && !r.draft && !r.conflicts;
           return v_flex().id(`rq-${r.iid}`).px(8).py(6).gap(3).rounded(6).cursor_pointer()
@@ -565,12 +628,14 @@ export default class ForgeRequests extends View {
                 cx.notify();
               }, { tone: toneOf(a), tooltip: describe(a) })))
               .when(hov === r && Boolean(hovAsk), (e) => e.child(button(t, `ask-${r.iid}`,
-                hovAsk.kind === "conflicts" ? "✦ Ask to fix conflicts" : "✦ Ask to merge", (cx) => {
+                hovAsk.kind === "conflicts" ? "✦ Ask to fix conflicts" : hovAsk.kind === "rebase" ? "✦ Ask to rebase" : "✦ Ask to merge", (cx) => {
                   this.confirming = { iid: r.iid, id: "ask", kind: hovAsk.kind, target: hovAsk.target };
                   cx.notify();
                 }, { tone: hovAsk.kind === "conflicts" ? "danger" : null,
                   tooltip: hovAsk.kind === "conflicts"
                     ? `Asks ${hovAsk.target.name}, the agent already on this branch, to rebase and resolve the conflicts. Never merges. Shows the message first.`
+                    : hovAsk.kind === "rebase"
+                    ? `Asks ${hovAsk.target.name}, the agent already on this branch, to rebase it onto ${hov.target ?? "the target"}${this.facts.get(hov.iid)?.clashes.length ? " and renumber its migration" : ""}. Never merges. Shows the message first.`
                     : `Asks ${hovAsk.target.name}, the agent already on this branch, to get it ready and merge once CI passes. Shows the message first.` })))
               .when(mergeable, (e) => e.child(button(t, `merge-${r.iid}`, "Merge", (cx) => {
                 this.confirming = { iid: r.iid, id: "merge" };
@@ -584,6 +649,7 @@ export default class ForgeRequests extends View {
               .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(r.source ?? ""))
               .children((r.labels ?? []).slice(0, 3).map((l) => pill(t, l)))
               .child(div().id(`upd-${r.iid}`).flex_none().text_size(10).text_color(t.dim).tooltip(`Updated ${agoAt(r.updated_ms)}`).child(ago(r.updated_ms))))
+            .when(Boolean(chips), (e) => e.child(chips))
             .children(agentsOf(r).map((a) => this.agentRow(t, r, a)));
         }))
         .when(recent.length > 0 || Boolean(this.mergedError), (e) => e

@@ -19,15 +19,18 @@ script, fire a Herdr command, or open a mod of your own with the item.
 ```
 
 `props.actions` replaces the defaults. To keep them and add yours, put `"defaults"` in
-the list: `["defaults", { ... }]`. `forge-issues` has no defaults. `forge-requests` has two:
+the list: `["defaults", { ... }]`. `forge-issues` has no defaults. `forge-requests` has three:
 
 - **✦ Get merged** (id `ship`) shows on a request open for a day or more. Claude Code fixes
   what's outstanding (failing CI, conflicts, review comments), then waits for your go-ahead
   before merging.
 - **✦ Fix conflicts** (id `resolve`, red) shows on a conflicted request. Claude Code rebases it
   onto the target branch and force-pushes the branch. It never merges.
+- **✦ Rebase** (id `rebase`) shows on a request without conflicts that must be rebased before it
+  can merge, or whose migration number is taken. Claude Code rebases it, renumbers the migration
+  and force-pushes. It never merges.
 
-Both ask before starting, work in a worktree of the request's branch, and don't show on requests
+All three ask before starting, work in a worktree of the request's branch, and don't show on requests
 from forks. Set `"actions": []` to turn them off.
 
 **Merge** isn't an action: it's built in, uses no agent, and merges the commit you saw at once

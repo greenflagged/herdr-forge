@@ -7,7 +7,7 @@ any of them; the README covers using the mods.
 
 | Mod | What it shows | forge.py commands |
 |---|---|---|
-| `forge-requests` | Open MRs (GitLab) / PRs (GitHub), with CI badges, Merge and action buttons; then merged ones, their deploy, and Clean up | `requests`, `merge`, `merged` |
+| `forge-requests` | Open MRs (GitLab) / PRs (GitHub), with CI badges, Merge and action buttons; then merged ones, their deploy, and Clean up; merge order chips | `requests`, `merge`, `merged`, `order` |
 | `forge-ci` | Recent pipelines / workflow runs; click for jobs; Retry, Cancel | `pipelines`, `jobs`, `pipeline-act` |
 | `forge-runners` | The project's own runners, what they run, jobs queued and stuck | `runners` |
 | `forge-milestones` | Active milestones with progress; expand for their issues | `milestones`, `milestone-items` |
@@ -37,6 +37,11 @@ and `npm test` fails when one is out of date. Machines that run forge.py must be
 - `folder`: the project's checkout on `on`, where agent actions start. `forge-requests`
   and `forge-issues` only.
 - `actions`: see [actions.md](actions.md). `forge-requests` and `forge-issues` only.
+- `migrations`: `forge-requests` only. A pattern (Python and JS regex alike) for migration file
+  paths whose last group of digits (dots or underscores between them allowed) is the version;
+  default `(^|/)V(\d+(?:[._]\d+)*)__[^/]*\.sql$` (Flyway, dotted versions too). Versions compare
+  as Flyway does: `1_02_0` is `1.2`;
+  `false` for none.
 - `deploy`: `{ label?, check }`, `forge-requests` only. `check` is run as `sh -c check sh <merge sha>`
   in `folder` on `on`: exit 0 deployed, 1 not yet, anything else the check failed (its first
   output line is shown). Run only once the merge commit's CI passed (or after 10 minutes with no
@@ -94,7 +99,9 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 |---|---|
 | `requests P <maxAge> <force>` | `{requests: [Request], at, error}` |
 | `merge P <iid> <sha>` | `{ok, text}` |
+| `order P <maxAge> <force> [pattern]` | `{requests: {iid: Order}, targets: [{ref, folder, files}], at, error}`: for the open requests (the cached list); `targets`: the file names on each target branch in every folder where an open request has a path matching `pattern` |
 | `merged P <maxAge> <force>` | `{merged: [Merged], at, error}`: merged in the last 7 days, newest first |
+| `deployed P <sha> <text>` | `{ok}`: records that the deploy check said this merge commit is live. Final: `merged` returns it as `deployed` from then on, and the panel stops checking. Kept 90 days |
 | `pipelines P <maxAge> <force>` | `{pipelines: [Pipeline], at, error}` |
 | `jobs P <pipelineId> <maxAge> <force>` | `{jobs: [Job], at, error}` |
 | `pipeline-act P <pipelineId> retry\|cancel` | `{ok}` |
@@ -119,7 +126,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `version` | `{version, shapes}` |
 
 Writes (`merge`, `pipeline-act`, `update`, `comment`, triage ones) answer `{error}` instead
-when they fail; nothing is cached for them. Writes drop the cached answers they change: `merge` drops requests, merged, CI and velocity;
+when they fail; nothing is cached for them. Writes drop the cached answers they change: `merge` drops requests, merged, order, CI and velocity;
 `pipeline-act` drops CI and runners' jobs; `update` drops milestones and velocity.
 Velocity isn't a cached answer: dropping it sets `velocity_at` to 0, so its next read fetches.
 
@@ -134,11 +141,16 @@ Request    {iid, title, url, draft, auto_merge, conflicts, source, target, sha, 
             labels[], created_ms, updated_ms, ci: {id, status, url, updated_ms} | null}
            fork: the source branch is in another project (a fork), so `source` names a
            branch that isn't in this repo
+Order      {sha, behind, rebase, files[]}   behind: commits the target gained since the branch
+           point (null if unknown); rebase: it can't merge until rebased (GitLab need_rebase,
+           or behind on a fast-forward / semi-linear project; GitHub BEHIND); files: paths it
+           changes, both sides of a rename (GitHub: the first 100)
 Merged     {iid, title, url, author, source, target, fork, head_sha, merge_sha, merged_ms,
-            ci: {id, status, url, updated_ms} | null}
+            ci: {id, status, url, updated_ms} | null, deployed: {at_ms, text} | null}
            merge_sha: what landed on target (the merge or squash commit; the head for a
            fast-forward); ci: the newest pipeline for merge_sha on target (GitLab), the merge
-           commit's rolled-up checks (GitHub, id null), null when none ran
+           commit's rolled-up checks (GitHub, id null), null when none ran;
+           deployed: {at_ms, text} once `deployed` recorded it, else null
 Pipeline   {id, iid, ref, sha, status, source, updated_ms, url, name?} ref: "main" or "!811";
            source: "request" (an MR/PR pipeline), else the forge's word (push, schedule, web...);
            name: the workflow's name (GitHub only)
