@@ -3,9 +3,9 @@ import { v_flex, h_flex } from "gpui-base";
 import {
   exec, readTextFile, appHome, props, theme, shared, agents, terminals, run, spaces, knownAgents, openOverlay, notify,
 } from "herdr";
-import { forgeClient, projectOf, requestItem, actionList, matches, runAction, describe, fill, ago, openUrl } from "./lib.js";
+import { forgeClient, projectOf, actionList, matches, runAction, describe, fill, ago, openUrl } from "./lib.js";
 import { Chrome, button, chip, note, pill, staleError } from "./ui.js";
-import { CI, defaultActions, checkoutOf, liveAgents } from "./requests.js";
+import { CI, defaultActions, checkoutOf, liveAgents, itemOf } from "./requests.js";
 
 // Open merge requests (GitLab) / pull requests (GitHub) for one project, through forge.py.
 // props: { repo, on?, provider?, host?, folder?, actions? } (docs/contract.md, docs/actions.md)
@@ -125,7 +125,7 @@ export default class ForgeRequests extends View {
     cx.spawn(async (cx) => {
       try {
         if (agent && !folder) throw new Error("No checkout of the repo found (set props.folder).");
-        const res = await runAction(a, requestItem(r, project), { on: project.on, folder },
+        const res = await runAction(a, itemOf(r, project), { on: project.on, folder },
           { exec, run, spaces, knownAgents, openOverlay });
         if (res?.text) this.notice = { iid: r.iid, text: res.text, error: false };
         this.toast(r, a.label, { text: res?.text || (agent ? "Agent started" : "Done"), error: false });
@@ -210,7 +210,7 @@ export default class ForgeRequests extends View {
       const hov = this.hovered != null ? this.requests.find((r) => r.iid === this.hovered) : null;
       let hovActions = [];
       if (hov && !this.busy[hov.iid] && this.confirming?.iid !== hov.iid) {
-        const item = requestItem(hov, project);
+        const item = itemOf(hov, project);
         hovActions = actionList(p.actions, defaultActions(terms), shared(`${MOD}.actions`)).filter((a) => matches(a.when, item));
       }
       // Agents per request (forge.requestAgents), with live status: the maps once per render.
@@ -230,7 +230,7 @@ export default class ForgeRequests extends View {
       const confirmRow = (r) => {
         const c = this.confirming;
         const a = c.id === "merge" ? null : actionById(c.id);
-        const question = c.id === "merge" ? `Merge into ${r.target ?? "target"}?` : fill(a?.confirm ?? "", requestItem(r, project));
+        const question = c.id === "merge" ? `Merge into ${r.target ?? "target"}?` : fill(a?.confirm ?? "", itemOf(r, project));
         return h_flex().gap(6).items_center().text_size(11.5)
           .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(question))
           .child(button(t, `cancel-${r.iid}`, "Cancel", (cx) => { this.confirming = null; cx.notify(); }))

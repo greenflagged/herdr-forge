@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   facetEntries, labelToggle, listQuery, metaScopes, nextSort, orderScopes, scopeOf, scopeTitle, scopeValues, scopedChange,
-  skillLine, skillVersion, sorts, splitLabels, togglePick, triageConfig, usesPriority, isAgentAction,
+  skillLine, skillVersion, sorts, splitLabels, startView, togglePick, triageConfig, usesPriority, isAgentAction,
 } from "../mods/forge-issues/issues.js";
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
@@ -125,4 +125,25 @@ test("usesPriority and isAgentAction", () => {
   assert.equal(isAgentAction({ task: "" }), true);
   assert.equal(isAgentAction({ agent: "codex" }), true);
   assert.equal(isAgentAction({ exec: ["x"] }), false);
+});
+
+test("startView takes props.view, keeping only well-formed parts", () => {
+  const dflt = { state: "opened", sort: "priority", picked: {}, q: "" };
+  assert.deepEqual(startView(undefined), dflt);
+  assert.deepEqual(startView([1]), dflt);
+  assert.deepEqual(startView({ state: "closed", sort: "updated", q: "login", picked: { "scope:type": ["bug"] } }),
+    { state: "closed", sort: "updated", picked: { "scope:type": ["bug"] }, q: "login" });
+  assert.deepEqual(startView({ state: "nope", sort: 3, q: 5 }), dflt);
+  // picked: only lists of strings survive (a string would be spread into letters, a number breaks the query).
+  assert.deepEqual(startView({ picked: { a: "bug", b: [1], c: ["x", null], d: ["ok"], e: null } }).picked, { d: ["ok"] });
+  assert.deepEqual(startView({ picked: ["bug"] }).picked, {});
+});
+
+test("issue writes go one at a time, and triage is recorded only after the write", () => {
+  const main = read("../mods/forge-issues/main.js");
+  assert.match(main, /write\(i, fields, local, type, cx, then = null\) \{\n\s+if \(this\.busy\) return false;/);
+  assert.match(main, /if \(ok && then\) then\(cx\);/);
+  assert.match(main, /this\.setScoped\(i, "priority", p\.priority, cx, record\)/);
+  assert.match(main, /this\.listPending === this\.seq/, "no next page while the list reloads");
+  assert.match(main, /this\.rows === from/, "a page lands only on the rows it was asked after");
 });

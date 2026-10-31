@@ -24,6 +24,9 @@ printf 'url\\t%s\\n' "$(git remote get-url origin 2>/dev/null)"`;
 const state = () => shared(STATE) ?? {};
 const save = (patch) => setShared(STATE, { ...state(), ...patch });
 const msg = (e) => String(e?.message ?? e);
+// A redraw for a view that may be gone: openWindow() replaces the window (and this bar)
+// in place, and the window can close while a spawn waits.
+const redraw = (view, cx) => { if (view.gone) return; try { cx.notify(); } catch { /* closed */ } };
 
 async function readConfig() {
   try { return parseConfig(await readTextFile(`${appHome()}/forge.json`)); } catch { return {}; }
@@ -88,18 +91,19 @@ export default class Forge extends View {
     this.config = {};
     this.busy = false;
     this.lastTarget = null;
-    cx.spawn(async (cx) => { this.config = await readConfig(); cx.notify(); });
+    cx.spawn(async (cx) => { this.config = await readConfig(); redraw(this, cx); });
     // Follow focus to another repo (unless pinned): checked when the focused folder changes.
     cx.timer.every(1000, (cx) => this.follow(cx));
   }
 
   async close() {
+    this.gone = true;
     // Closed (not replaced by another project's window, which has its own id).
     if (this.bar && state().id === props()?.overlay) save({ id: null });
   }
 
   follow(cx) {
-    if (state().pinned || this.busy) return;
+    if (this.gone || state().pinned || this.busy) return;
     const tg = target();
     if (!tg) return;
     const key = JSON.stringify([tg.on, tg.cwd]);
@@ -109,11 +113,18 @@ export default class Forge extends View {
     cx.spawn(async (cx) => {
       try {
         const p = await resolve(tg, this.config);
-        if (p && !p.none && projectKey(p) !== projectKey(state().project)) openWindow(p, this.config);
+        if (!this.gone && !state().pinned && p && !p.none && projectKey(p) !== projectKey(state().project)) this.replace(p);
       } catch { /* unreachable machine or no git: stay on this project */ }
       this.busy = false;
-      cx.notify();
+      redraw(this, cx);
     });
+  }
+
+  // Opens a project in place of this window. This bar is gone after it: nothing here may
+  // redraw it.
+  replace(project) {
+    this.gone = true;
+    openWindow(project, this.config);
   }
 
   togglePanel(name) {
@@ -122,7 +133,7 @@ export default class Forge extends View {
     if (hidden.has(name)) hidden.delete(name); else hidden.add(name);
     if (hidden.size === PANELS.length) return; // keep at least one
     save({ hidden: [...hidden] });
-    if (s.project) openWindow(s.project, this.config);
+    if (s.project) this.replace(s.project);
   }
 
   render() {
@@ -139,7 +150,7 @@ export default class Forge extends View {
         .hover((st) => st.bg(t.hover))
         .tooltip(on ? `Hide ${panel.label}` : `Show ${panel.label}`)
         .on_mouse_down("left", stop)
-        .on_click((_e, cx) => { cx.stop_propagation(); this.togglePanel(panel.name); cx.notify(); })
+        .on_click((_e, cx) => { cx.stop_propagation(); this.togglePanel(panel.name); redraw(this, cx); })
         .child(panel.label);
     };
     // Pressing the bar anywhere but its controls drags the window.

@@ -12,7 +12,12 @@ test("the window holds every panel under its bar, with the project's props", () 
   const blocks = l.children[1].children.flatMap((n) => n.children ?? [n]);
   const issues = blocks.find((b) => b.content.mod === "forge-issues").content.props;
   assert.deepEqual(issues, { provider: "gitlab", host: "gitlab.com", repo: "acme/shop", on: "mac", folder: "/src/shop" });
-  assert.equal(blocks.find((b) => b.content.mod === "forge-velocity").content.props.glabOn, "mac");
+  const velocity = blocks.find((b) => b.content.mod === "forge-velocity").content.props;
+  assert.equal(velocity.glabOn, "mac");
+  // The window's project, not the focused terminal's: velocity reads this checkout.
+  assert.equal(velocity.folder, "/src/shop");
+  assert.equal(velocity.on, "mac");
+  assert.equal(velocity.repo, "acme/shop");
 });
 
 test("hidden panels are left out, and an empty left column goes", () => {

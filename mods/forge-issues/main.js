@@ -11,6 +11,7 @@ import { Chrome, button, chip, note, staleError, dropdown } from "./ui.js";
 import {
   STATES, DEFAULT_SEP, sorts, nextSort, splitLabels, scopedChange, labelToggle, scopeValues, metaScopes,
   orderScopes, scopeTitle, facetEntries, togglePick, listQuery, triageConfig, skillLine, usesPriority, isAgentAction, scopeOf,
+  startView,
 } from "./issues.js";
 
 // An issue browser, opened as a tab: tab.new { name, mod: "forge-issues", props }.
@@ -21,6 +22,7 @@ import {
 //   scopeSep: "::"                     the scoped-label separator (default: the forge's)
 //   triage: true | { agent, task, tab } the optional triage agent (off by default)
 //   issue: 123                         open this issue at once (a link into the tab from another mod)
+//   view: { state, sort, picked, q }   where the list starts, e.g. { picked: { "scope:type": ["bug"] } }
 // Keys on the list: ↑/↓ or j/k move the selection, / searches, Esc clears the search,
 // Enter opens the selected issue in the browser.
 // forge.py keeps the issues in SQLite on `on` and does the filtering, counting and
@@ -65,12 +67,16 @@ export default class Issues extends View {
     this.listError = null;
     this.syncError = null;
     this.syncing = false;
+    this.syncAgain = false;      // a ↻ came during a sync: sync again after it
     this.seq = 0;                // newest list query; older answers are dropped
+    this.listPending = null;     // the seq of the list load in flight
     this.paging = false;
-    this.state = "opened";
-    this.sort = "priority";
-    this.picked = {};            // group -> [values] (OR within, AND across)
-    this.query = "";
+    // props.view: where the list starts ("my open bugs"); the person changes it from there.
+    const view = startView(props()?.view);
+    this.state = view.state;
+    this.sort = view.sort;
+    this.picked = view.picked;   // group -> [values] (OR within, AND across)
+    this.query = view.q;
     this.selected = null;
     this.detail = null;          // show() of the selected issue
     this.detailError = null;
@@ -94,6 +100,7 @@ export default class Issues extends View {
     this.input.on("change", () => { this.typedAt = Date.now(); this.pendingQuery = this.input.value().trim(); });
     this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx?.notify(); });
     this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx?.notify(); });
+    if (this.query) this.input.set_value(this.query);
     this.comment = TextareaState.new({ placeholder: `Comment (written to ${terms.name})`, rows: 3 });
 
     // Stale first: what SQLite has now, then a sync with the forge.
@@ -159,7 +166,9 @@ export default class Issues extends View {
   }
 
   sync(cx, force) {
-    if (this.syncing || !this.ready()) return;
+    if (!this.ready()) return;
+    // A ↻ while a sync runs goes after it (a poll can wait for its next turn).
+    if (this.syncing) { if (force) this.syncAgain = true; return; }
     this.syncing = true;
     this.lastPoll = Date.now();
     cx.notify();
@@ -187,6 +196,7 @@ export default class Issues extends View {
         this.syncing = false;
         cx.notify();
       }
+      if (this.syncAgain) { this.syncAgain = false; this.sync(cx, true); }
     });
   }
 
@@ -204,6 +214,7 @@ export default class Issues extends View {
   }
 
   async loadList(seq) {
+    this.listPending = seq; // more() waits for it: its rows replace the list
     try {
       const out = await this.py(["query", this.queryJson(0)]);
       if (seq !== this.seq) return;
@@ -221,6 +232,8 @@ export default class Issues extends View {
       if (seq !== this.seq) return;
       this.listError = msg(e);
       if (!this.loadedOnce) this.loadFailed = true;
+    } finally {
+      if (this.listPending === seq) this.listPending = null;
     }
   }
 
@@ -231,15 +244,17 @@ export default class Issues extends View {
     cx.spawn(async (cx) => { await this.loadList(seq); cx.notify(); });
   }
 
-  // The next page, when the list scrolls near the end of what's fetched.
+  // The next page, when the list scrolls near the end of what's fetched. Not while the
+  // list itself is loading (its rows replace these), and only onto the rows it started
+  // from: a reload meanwhile would put the page at the wrong offset.
   more(cx) {
-    if (this.paging || this.rows.length >= this.matched) return;
+    if (this.paging || this.listPending === this.seq || this.rows.length >= this.matched) return;
     this.paging = true;
-    const seq = this.seq, offset = this.rows.length;
+    const seq = this.seq, from = this.rows, offset = from.length;
     cx.spawn(async (cx) => {
       try {
         const out = await this.py(["query", this.queryJson(offset)]);
-        if (seq === this.seq && Array.isArray(out.rows)) this.rows = this.rows.concat(out.rows);
+        if (seq === this.seq && this.rows === from && Array.isArray(out.rows)) this.rows = from.concat(out.rows);
       } catch { /* the next scroll asks again */ }
       this.paging = false;
       cx.notify();
@@ -290,17 +305,23 @@ export default class Issues extends View {
   // ---- writing to the forge ----
 
   // fields go to `update`; `local` is how the issue should look meanwhile. On failure
-  // the issue goes back to how it was.
-  write(i, fields, local, type, cx) {
+  // the issue goes back to how it was. One write at a time (`busy`): the detail pane
+  // disables its controls meanwhile, so a rollback never undoes another write's change.
+  // then(cx): runs only once the forge took the write. Returns whether it started.
+  write(i, fields, local, type, cx, then = null) {
+    if (this.busy) return false;
     const before = this.detail;
     this.setDetail({ ...before, issue: { ...i, ...local } });
     this.busy = true;
     this.error = null;
+    this.picker.open = null;
     cx.notify();
     cx.spawn(async (cx) => {
+      let ok = false;
       try {
         const out = await this.py(["update", i.iid, JSON.stringify(fields)]);
         if (out.error || !out.issue) throw new Error(out.error ?? "no answer");
+        ok = true;
         if (this.selected === i.iid) this.setDetail({ ...this.detail, issue: out.issue });
         this.event(type, i.iid);
         this.reload(cx);
@@ -312,13 +333,17 @@ export default class Issues extends View {
         this.busy = false;
         cx.notify();
       }
+      if (ok && then) then(cx);
     });
+    return true;
   }
 
   // Sets scope<sep>value (null clears it), dropping any other label of that scope.
-  setScoped(i, scope, value, cx) {
+  // then(cx) runs once the forge has it (or at once if there's nothing to change).
+  setScoped(i, scope, value, cx, then = null) {
     const ch = scopedChange(i.labels, scope, value, this.sep());
-    if (ch) this.write(i, ch.fields, { labels: ch.labels }, "updated", cx);
+    if (ch) this.write(i, ch.fields, { labels: ch.labels }, "updated", cx, then);
+    else if (then && !this.busy) then(cx);
   }
 
   toggleLabel(i, label, cx) {
@@ -338,7 +363,7 @@ export default class Issues extends View {
 
   postComment(i, cx) {
     const body = this.comment.value().trim();
-    if (!body) return;
+    if (!body || this.busy) return;
     this.busy = true;
     cx.notify();
     cx.spawn(async (cx) => {
@@ -367,6 +392,7 @@ export default class Issues extends View {
   }
 
   act(i, a, cx) {
+    if (this.busy) return;
     if (a.confirm && this.confirming !== a.id) { this.confirming = a.id; cx.notify(); return; }
     this.confirming = null;
     this.notice = null;
@@ -418,15 +444,18 @@ export default class Issues extends View {
 
   // ---- triage (only with props.triage) ----
 
+  // Accepting records "accepted" only once the forge took the priority: a failed write
+  // leaves the proposal standing (write's rollback brings it back).
   answerTriage(i, accept, cx) {
     const p = this.detail?.triage;
-    if (!p) return;
-    if (accept && p.priority) this.setScoped(i, "priority", p.priority, cx);
-    this.detail = { ...this.detail, triage: { ...p, status: accept ? "accepted" : "dismissed" } };
-    cx.notify();
-    cx.spawn(async (cx) => {
+    if (!p || this.busy) return;
+    const record = (cx) => cx.spawn(async (cx) => {
       try { await this.py(["triage", i.iid, accept ? "accepted" : "dismissed"]); this.reload(cx); } catch { /* shows again next time */ }
     });
+    if (accept && p.priority) this.setScoped(i, "priority", p.priority, cx, record);
+    else record(cx);
+    if (this.detail?.issue?.iid === i.iid) this.detail = { ...this.detail, triage: { ...p, status: accept ? "accepted" : "dismissed" } };
+    cx.notify();
   }
 
   // A priority set by hand is locked: triage ranks the issue but won't propose another.
@@ -730,20 +759,27 @@ export default class Issues extends View {
     const launches = d.launches ?? [];
     const requestAgents = shared("forge.requestAgents") ?? {};
 
-    // One value per field (a scoped label holds one), so each is a dropdown.
+    // One value per field (a scoped label holds one), so each is a dropdown. While a write
+    // is in flight every control that writes is inert: one write at a time.
     const pickRow = (title, options, current, onPick) => h_flex().gap(6).items_center()
       .child(div().w(64).flex_none().text_size(11).text_color(t.dim).truncate().child(title))
-      .child(dropdown(t, `pick-${title}`, options, current, onPick, this.picker));
+      .child(busy
+        ? div().px(6).py(1).rounded(4).border_1().border_color(t.border).text_size(11.5).text_color(t.dim).max_w(220).truncate()
+          .child((options.find(([v]) => v === current) ?? [null, "none"])[1])
+        : dropdown(t, `pick-${title}`, options, current, onPick, this.picker));
+    // A button that does nothing while busy.
+    const btn = (id, label, onClick, opts) => busy
+      ? div().id(id).flex_none().px(8).py(2).rounded(5).bg(t.raised).opacity(0.5).text_size(11.5).text_color(t.dim).child(label)
+      : button(t, id, label, onClick, opts);
 
     const scopes = orderScopes(this.scopes, props()?.scopes, [...metaScopes(this.labels, sep), ...Object.keys(scoped)]);
     const scopeRow = (scope) => {
       const cur = scoped[scope] ?? null;
       const prio = scope === "priority";
       const opts = scopeValues(this.labels, scope, sep, cur).map((v) => [v, v, prio ? this.prioColor(t, v) : undefined]);
-      return pickRow(scopeTitle(scope), [...opts, [null, "none"]], cur, (v, cx) => {
-        this.setScoped(i, scope, v, cx);
-        if (prio && tc) this.setLock(i, true, cx);
-      });
+      // A priority set by hand locks it, once the forge has it.
+      return pickRow(scopeTitle(scope), [...opts, [null, "none"]], cur, (v, cx) =>
+        this.setScoped(i, scope, v, cx, prio && tc ? (cx) => this.setLock(i, true, cx) : null));
     };
     const plainLabels = this.labels.filter((l) => !scopeOf(l.name, sep)[0]);
     const milestones = i.milestone && !this.milestones.some((m) => m.id === i.milestone.id) ? [...this.milestones, i.milestone] : this.milestones;
@@ -771,13 +807,13 @@ export default class Issues extends View {
         .when((i.assignees ?? []).length > 0, (e) => e.child(div().child(`→ ${i.assignees.join(", ")}`)))
         .when(busy, (e) => e.child(div().text_color(t.accent).child(`Saving to ${terms.name}…`))))
       .child(h_flex().gap(6).pt(6).flex_wrap()
-        .children(actions.map((a) => button(t, `act-${a.id}`, a.label, (cx) => this.act(i, a, cx),
+        .children(actions.map((a) => btn(`act-${a.id}`, a.label, (cx) => this.act(i, a, cx),
           { tone: a.tone ?? (a.primary ? "primary" : null), tooltip: describe(a) })))
-        .child(button(t, "state", i.state === "opened" ? "Close issue" : "Reopen", (cx) => this.setState(i, cx))))
+        .child(btn("state", i.state === "opened" ? "Close issue" : "Reopen", (cx) => this.setState(i, cx))))
       .when(Boolean(confirming), (e) => e.child(h_flex().gap(6).items_center().p(8).rounded(6).border_1().border_color(t.accent).text_size(11.5)
         .child(div().flex_1().min_w(0).child(typeof confirming.confirm === "string" ? confirming.confirm : `${confirming.label}?`))
         .child(button(t, "confirm-no", "Cancel", (cx) => { this.confirming = null; cx.notify(); }))
-        .child(button(t, "confirm-yes", confirming.label, (cx) => this.act(i, confirming, cx),
+        .child(btn("confirm-yes", confirming.label, (cx) => this.act(i, confirming, cx),
           { tone: confirming.tone ?? "primary" }))))
       .when(Boolean(this.notice), (e) => e.child(div().text_size(11.5).text_color(t.muted).child(this.notice)))
       .when(launches.length > 0, (e) => e.children(launches.map((l, k) => {
@@ -794,8 +830,8 @@ export default class Issues extends View {
       .when(proposal?.status === "proposed" && Boolean(proposal?.priority), (e) => e.child(v_flex().gap(4).p(8).rounded(6).border_1().border_color(t.accent)
         .child(h_flex().gap(6).items_center().text_size(11.5)
           .child(div().flex_1().child(`Triage suggests priority${sep}${proposal.priority}${proposal.rank ? ` (rank ${proposal.rank})` : ""}`))
-          .child(button(t, "tri-yes", "Accept", (cx) => this.answerTriage(i, true, cx), { tone: "primary" }))
-          .child(button(t, "tri-no", "Dismiss", (cx) => this.answerTriage(i, false, cx))))
+          .child(btn("tri-yes", "Accept", (cx) => this.answerTriage(i, true, cx), { tone: "primary" }))
+          .child(btn("tri-no", "Dismiss", (cx) => this.answerTriage(i, false, cx))))
         .when(Boolean(proposal.reason), (e) => e.child(div().text_size(11.5).text_color(t.muted).child(proposal.reason)))))
       .child(section("Fields"))
       .children(scopeRows)
@@ -805,15 +841,19 @@ export default class Issues extends View {
         .child(div().w(64).flex_none().pt(2).text_size(11).text_color(t.dim).child("Labels"))
         .child(h_flex().flex_1().min_w(0).gap(4).flex_wrap()
           .children(plain.map((l) => div().id(`rm-${l}`).px(6).py(1).rounded(4).border_1().border_color(t.border).text_size(11)
-            .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Remove")
-            .on_click((_e, cx) => this.toggleLabel(i, l, cx)).child(`${l} ×`)))
+            .when(busy, (e) => e.opacity(0.5))
+            .when(!busy, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Remove")
+              .on_click((_e, cx) => this.toggleLabel(i, l, cx)))
+            .child(`${l} ×`)))
           .child(div().id("add-label").px(6).py(1).rounded(4).text_size(11).text_color(t.accent).cursor_pointer()
             .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.adding = !this.adding; cx.notify(); })
             .child(this.adding ? "done" : "+ label"))))
       .when(this.adding, (e) => e.child(h_flex().pl(70).gap(4).flex_wrap().children(plainLabels.filter((l) => !plain.includes(l.name)).map((l) =>
         div().id(`add-${l.name}`).px(6).py(1).rounded(4).border_1().border_color(t.border).text_size(11).text_color(t.muted)
-          .cursor_pointer().hover((s) => s.bg(t.hover)).when(Boolean(l.description), (e) => e.tooltip(l.description))
-          .on_click((_e, cx) => this.toggleLabel(i, l.name, cx)).child(l.name)))))
+          .when(Boolean(l.description), (e) => e.tooltip(l.description))
+          .when(busy, (e) => e.opacity(0.5))
+          .when(!busy, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.toggleLabel(i, l.name, cx)))
+          .child(l.name)))))
       .child(section(terms.requests))
       .child(!d.requests?.length ? div().text_size(11.5).text_color(t.dim).child("None linked.")
         : v_flex().gap(2).children(d.requests.map((m) => {
@@ -839,7 +879,7 @@ export default class Issues extends View {
         .child(div().id("comment-box").rounded(6).border_1().border_color(t.border).p(6).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .child(Textarea.new(this.comment).w_full().text_size(12).text_color(t.foreground)))
-        .child(h_flex().justify_end().child(button(t, "post-comment", busy ? "Posting…" : "Comment", (cx) => this.postComment(i, cx)))));
+        .child(h_flex().justify_end().child(btn("post-comment", "Comment", (cx) => this.postComment(i, cx)))));
   }
 
   render() {

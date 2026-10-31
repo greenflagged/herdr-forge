@@ -39,7 +39,8 @@ export default class Milestones extends View {
     this.at = 0;                // when the answer was fetched (epoch s)
     this.error = null;
     this.loading = false;
-    this.started = false;       // the first read (maxAge -1) has run
+    this.again = false;         // a ↻ came while a fetch ran: fetch again after it
+    this.started = false;      // the first read (maxAge -1) has run
     this.polled = 0;            // when we last asked (ms)
     this.expanded = new Set();  // titles shown open
     this.items = {};            // title -> { list, at, error, loading, started }
@@ -64,7 +65,9 @@ export default class Milestones extends View {
   // or missing) a second asks for a fresh one.
   refresh(cx, force) {
     const p = this.project();
-    if (this.loading || !p.repo || !p.provider) return;
+    if (!p.repo || !p.provider) return;
+    // A ↻ while a fetch runs goes after it (a poll can wait for its next turn).
+    if (this.loading) { if (force) this.again = true; return; }
     this.loading = true;
     this.polled = Date.now();
     cx.notify();
@@ -81,6 +84,7 @@ export default class Milestones extends View {
         this.loading = false;
         cx.notify();
       }
+      if (this.again) { this.again = false; this.refresh(cx, true); return; } // it loads the items too
       for (const title of this.expanded) this.loadItems(title, cx, force);
     });
   }
@@ -104,7 +108,7 @@ export default class Milestones extends View {
   loadItems(title, cx, force) {
     const p = this.project();
     const prev = this.items[title];
-    if (prev?.loading) return;
+    if (prev?.loading) { if (force) prev.again = true; return; }
     const st = (this.items[title] = { list: prev?.list ?? [], at: prev?.at ?? 0, error: null, loading: true, started: prev?.started });
     cx.notify();
     cx.spawn(async (cx) => {
@@ -126,6 +130,7 @@ export default class Milestones extends View {
         st.loading = false;
         cx.notify();
       }
+      if (st.again && this.items[title] === st) this.loadItems(title, cx, true);
     });
   }
 

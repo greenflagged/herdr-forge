@@ -7,7 +7,7 @@ import { prepare, bucketLabel, day } from "./view.js";
 
 // Velocity of the focused project: commits, merged requests, closed issues and request
 // cycle time, last 12 weeks (or 30 days). Follows the focused terminal's repo on its
-// machine. forge.py does the fetching, caching and bucketing; this file only draws.
+// machine, unless props.folder names a checkout to show. forge.py does the fetching, caching and bucketing; this file only draws.
 // - Commits: `forge.py commits` on the repo's machine (git log of the default branch,
 //   fetched every 15 min there). Asked every 5 min while shown.
 // - Requests and issues: `forge.py velocity` with the repo's remote (host and path).
@@ -16,9 +16,11 @@ import { prepare, bucketLabel, day } from "./view.js";
 //   forge we read (props.forges can name self-hosted ones) gets its commits only.
 // - ↻ fetches both now.
 // props: { forges?: { "git.example.com": "gitlab" },
-//          glabOn?: "<machine>" | null }: where forge.py talks to the forge when the repo's
+//          glabOn?: "<machine>" | null,  where forge.py talks to the forge when the repo's
 //          machine has no CLI (glab) logged in. The repo's machine is tried first; the one
 //          that works is remembered per repo until restart.
+//          folder?, on? }                a checkout (on that machine) to show instead of
+//          following focus: the Forge window passes its project's.
 
 const MOD = "forge-velocity";
 const COMMITS_EVERY = 5 * 60000, FORGE_EVERY = 5 * 60000;
@@ -46,7 +48,8 @@ export default class Velocity extends View {
     this.data = {};       // key -> repo state (see state())
     this.hover = null;    // bucket index under the pointer
     // Show the last repo at once after a restart: its first calls answer from forge.py's cache.
-    try {
+    // (Not with a fixed folder: that's the only repo this panel shows.)
+    if (!this.fixed()) try {
       const last = JSON.parse(load("last") ?? "null");
       if (last?.key && last.top) { this.data[last.key] = this.state(last); this.key = last.key; }
     } catch {}
@@ -54,8 +57,17 @@ export default class Velocity extends View {
     cx.timer.every(1000, (cx) => this.tick(cx));
   }
 
-  // Where the keyboard is: the focused terminal's folder, on its space's machine.
+  // props.folder: a checkout to show, instead of following focus.
+  fixed() {
+    const f = props()?.folder;
+    return typeof f === "string" && f ? f : null;
+  }
+
+  // The folder to show: props.folder (on props.on), else where the keyboard is (the
+  // focused terminal's folder, on its space's machine).
   target() {
+    const fixed = this.fixed();
+    if (fixed) return { on: props()?.on ?? null, cwd: fixed };
     const f = focused();
     if (!f) return null;
     const sp = spaces().find((s) => s.id === f.space);
@@ -82,7 +94,7 @@ export default class Velocity extends View {
     if (r === undefined || (r.none && Date.now() - r.at > 5 * 60000)) this.resolve(rk, tg, cx);
     else if (r && !r.none && r.key !== this.key) {
       this.key = r.key; this.followed = true; this.hover = null;
-      store("last", JSON.stringify(this.data[r.key].meta));
+      if (!this.fixed()) store("last", JSON.stringify(this.data[r.key].meta));
       cx.notify();
     }
     else if (r?.none && this.followed) { this.followed = false; cx.notify(); }
@@ -275,7 +287,12 @@ export default class Velocity extends View {
     const root = () => v_flex().id("velocity").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .child(header);
     if (this.chrome.collapsed()) return root();
-    if (!s) return root().child(note(t, this.resolving ? "Finding the repo…" : "Focus a terminal in a git repo."));
+    if (!s) {
+      const fixed = this.fixed(), on = props()?.on;
+      return root().child(note(t, this.resolving ? "Finding the repo…"
+        : fixed ? `No git checkout at ${fixed}${on ? ` on ${on}` : ""} (or it can't be reached).`
+        : "Focus a terminal in a git repo."));
+    }
 
     const v = s.view;
     const sel = this.hover ?? v.n - 1;
