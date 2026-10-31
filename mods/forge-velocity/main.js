@@ -1,7 +1,8 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, readTextFile, appHome, focused, spaces, panes, props, theme, layout, window } from "herdr";
-import { forgeClient, isShown, parseRemote, providerForHost, TERMS, ago, num } from "./lib.js";
+import { exec, readTextFile, appHome, focused, spaces, panes, props, theme, window } from "herdr";
+import { forgeClient, parseRemote, providerForHost, TERMS, num } from "./lib.js";
+import { Chrome, note } from "./ui.js";
 import { prepare, bucketLabel, day } from "./view.js";
 
 // Velocity of the focused project: commits, merged requests, closed issues and request
@@ -22,7 +23,6 @@ import { prepare, bucketLabel, day } from "./view.js";
 const MOD = "forge-velocity";
 const COMMITS_EVERY = 5 * 60000, FORGE_EVERY = 5 * 60000;
 const FORGE_AGE = 900; // seconds: forge.py fetches when its copy is older than this
-const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const RESOLVE = `top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 printf 'top\\t%s\\n' "$top"
@@ -36,6 +36,8 @@ const load = (k) => { try { return localStorage.getItem(k); } catch { return nul
 export default class Velocity extends View {
   init(_props, cx) {
     this.forge = forgeClient({ exec, readTextFile }, `${appHome()}/mods/${MOD}/forge.py`);
+    this.chrome = new Chrome(MOD, {}, { width: 340, height: 460 });
+    this.chrome.attach(cx);
     this.range = load("range") === "30d" ? "30d" : "12w";
     this.resolved = {};   // JSON [on, cwd] -> { key } | { none, at }
     this.resolving = null;
@@ -67,7 +69,7 @@ export default class Velocity extends View {
     // Redraw now and then: "3m" moves, and a redraw Herdr dropped doesn't stick.
     if (Date.now() - (this.drawn ?? 0) > 30000) cx.notify();
     const s = this.key && this.data[this.key];
-    if (!s || !isShown(layout(), MOD, {}, { panes: panes(), spaces: spaces() })) return;
+    if (!s || !this.chrome.visible()) return;
     const now = Date.now();
     if (!s.cBusy && now - s.cAt >= COMMITS_EVERY) this.loadCommits(s, false, cx);
     if (s.provider && !s.vBusy && now - s.vAt >= FORGE_EVERY) this.loadVelocity(s, false, cx);
@@ -252,28 +254,28 @@ export default class Velocity extends View {
     }
   }
 
-  draw(cx) {
+  draw(_cx) {
     const t = theme(), s = this.key ? this.data[this.key] : null;
-    const busy = s && (s.cBusy || s.vBusy);
+    const busy = Boolean(s && (s.cBusy || s.vBusy));
 
-    const pill = (id) => div().id(`range-${id}`).px(5).py(1).rounded(4).text_size(10).cursor_pointer()
-      .when(this.range === id, (e) => e.bg(t.raised).text_color(t.foreground))
-      .when(this.range !== id, (e) => e.text_color(t.dim).hover((h) => h.text_color(t.foreground)))
-      .on_click((_e, cx) => this.setRange(id, cx))
+    const range = (id) => div().id(`range-${id}`).flex_none().px(5).rounded(4).border_1().text_size(10).cursor_pointer()
+      .when(this.range === id, (e) => e.border_color(t.border).bg(t.raised).text_color(t.foreground))
+      .when(this.range !== id, (e) => e.border_color(t.background).text_color(t.dim).hover((h) => h.text_color(t.foreground)))
+      .tooltip(id === "12w" ? "Last 12 weeks" : "Last 30 days")
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.setRange(id, cx); })
       .child(id);
 
-    const header = h_flex().h(34).flex_none().pl(12).pr(6).gap(6).items_center().border_b(1).border_color(t.border)
-      .child(div().font_semibold().child("Velocity"))
-      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(this.followed ? t.dim : t.ansi3).child(s?.name ?? ""))
-      .child(h_flex().gap(1).child(pill("12w")).child(pill("30d")))
-      .child(div().id("vel-refresh").w(18).flex_none().text_size(12).text_color(t.muted).cursor_pointer()
-        .hover((h) => h.text_color(t.foreground))
-        .on_click((_e, cx) => this.refresh(cx))
-        .child(busy ? div().frames(FRAMES, 90) : "↻"));
-
-    if (!s) return v_flex().id("velocity").size_full().bg(t.background).text_color(t.foreground).text_size(13)
-      .child(header)
-      .child(div().p(12).text_size(12).text_color(t.muted).child(this.resolving ? "Finding the repo…" : "Focus a terminal in a git repo."));
+    const header = this.chrome.header(t, {
+      title: "Velocity", sub: s ? (this.followed ? s.name : `${s.name} (last)`) : "",
+      at: s?.commits?.at ? s.commits.at * 1000 : null, loading: busy,
+      onRefresh: s ? (cx) => this.refresh(cx) : null,
+      extra: [h_flex().flex_none().gap(1).child(range("12w")).child(range("30d"))],
+    });
+    const root = () => v_flex().id("velocity").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+      .child(header);
+    if (this.chrome.collapsed()) return root();
+    if (!s) return root().child(note(t, this.resolving ? "Finding the repo…" : "Focus a terminal in a git repo."));
 
     const v = s.view;
     const sel = this.hover ?? v.n - 1;
@@ -281,25 +283,23 @@ export default class Velocity extends View {
       : !this.followed ? "last repo · focus isn't in one" : "last 7 days · vs avg week";
 
     const hint = s.nocli && props()?.glabOn === undefined ? ` (set props.glabOn to a machine where ${s.terms.cli} is logged in)` : "";
-    const note = s.cErr ? { text: s.cErr, color: t.ansi1 }
+    const warn = s.cErr ? { text: s.cErr, color: t.ansi1 }
       : s.vErr ? { text: `${s.terms.name}: ${s.vErr}${hint}`, color: t.ansi1 }
       : !s.provider ? { text: `${s.host ?? "no remote"}: commits only`, color: t.dim }
       : null;
 
     const total = (k) => v.rows.find((r) => r.key === k)?.total ?? 0;
     const footer = `${s.ref || "HEAD"} · ${num(total("commits"))} commits`
-      + (s.provider ? ` · ${num(total("merged"))} ${s.terms.request}s` : "")
-      + (s.commits?.at ? ` · ${ago(s.commits.at * 1000)}` : "");
+      + (s.provider ? ` · ${num(total("merged"))} ${s.terms.request}s` : "");
 
-    return v_flex().id("velocity").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
-      .child(header)
-      .child(v_flex().id("vel-body").flex_1().min_h(0).overflow_y_scrollbar().px(12).pt(6).pb(8).gap(9)
-        .child(div().text_size(10).text_color(this.hover != null ? t.foreground : t.dim).truncate().child(caption))
+    return root()
+      .child(v_flex().id("vel-body").flex_1().min_h(0).overflow_y_scrollbar().px(12).pt(8).pb(8).gap(10)
+        .child(div().text_size(10).text_color(this.hover != null ? t.foreground : this.followed ? t.dim : t.ansi3).truncate().child(caption))
         .children(v.rows.map((r) => this.row(r, t, sel)))
         .child(h_flex().justify_between().text_size(9).text_color(t.dim)
           .child(v.start != null ? day(v.start) : "").child(this.range === "30d" ? "today" : "now"))
-        .when(Boolean(note), (e) => e.child(div().text_size(10).text_color(note.color).child(note.text))))
-      .child(div().flex_none().h(22).px(12).border_t(1).border_color(t.border).flex().items_center()
+        .when(Boolean(warn), (e) => e.child(div().text_size(11).text_color(warn.color).child(warn.text))))
+      .child(div().flex_none().h(24).px(12).border_t(1).border_color(t.border).flex().items_center()
         .text_size(10).text_color(t.dim).child(div().truncate().child(footer)));
   }
 }

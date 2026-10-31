@@ -1,7 +1,8 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, readTextFile, appHome, props, theme, layout, panes, spaces, window } from "herdr";
-import { forgeClient, projectOf, isShown, ago, clock, openUrl } from "./lib.js";
+import { exec, readTextFile, appHome, props, theme, window, notify } from "herdr";
+import { forgeClient, projectOf, ago, clock, openUrl } from "./lib.js";
+import { Chrome, button, note, staleError } from "./ui.js";
 import { LIVE, pollEvery, groupJobs, jobsStale } from "./ci.js";
 
 // Recent pipelines (GitLab) / workflow runs (GitHub) for one project, through forge.py on
@@ -18,6 +19,8 @@ export default class CI extends View {
   init(_props, cx) {
     this.forge = forgeClient({ exec, readTextFile }, `${appHome()}/mods/${MOD}/forge.py`);
     this.project = projectOf(props() ?? {});
+    this.chrome = new Chrome(MOD, { repo: this.project.repo }, { width: 420, height: 560 });
+    this.chrome.attach(cx);
     this.pipelines = [];
     this.jobs = {};          // pipeline id -> { groups, error, status, updated_ms } | "loading"
     this.jobsBusy = new Set();
@@ -25,6 +28,7 @@ export default class CI extends View {
     this.hovered = null;
     this.acting = null;      // pipeline id with a retry/cancel in flight
     this.error = null;
+    this.at = 0;             // when forge.py fetched the list (epoch s)
     this.loading = false;
     this.again = null;       // a refresh asked for while one ran: [maxAge, force]
     this.last = 0;
@@ -33,10 +37,10 @@ export default class CI extends View {
     if (!this.usable()) return;
     // Whatever is cached, however old, so the panel draws at once.
     this.refresh(cx, -1, false);
-    // Only while shown: every 10 s while something recent is running (and the window is
-    // in front), else every minute. Showing it refreshes at once.
+    // Only while on screen and not collapsed: every 10 s while something recent is running
+    // (and the window is in front), else every minute. Showing it refreshes at once.
     cx.timer.every(1000, (cx) => {
-      const shown = isShown(layout(), MOD, { repo: this.project.repo }, { panes: panes(), spaces: spaces() });
+      const shown = this.chrome.visible();
       const opened = shown && !this.shown;
       this.shown = shown;
       if (!shown) return;
@@ -69,6 +73,7 @@ export default class CI extends View {
       try {
         const out = await this.call(["pipelines", maxAge, force ? 1 : 0]);
         this.pipelines = out.pipelines ?? [];
+        this.at = out.at ?? this.at;
         this.error = out.error ?? null;
         // Expanded ones whose jobs could have changed.
         for (const p of this.pipelines) {
@@ -126,12 +131,21 @@ export default class CI extends View {
     this.acting = p.id;
     cx.notify();
     cx.spawn(async (cx) => {
+      const verb = what === "retry" ? "Retry" : "Cancel";
+      const name = `${this.project.terms.ciRun} #${p.id}${p.ref ? ` · ${p.ref}` : ""}`;
+      let failed = null;
       try {
         const out = await this.call(["pipeline-act", p.id, what]);
-        this.error = out.error ? `${what} failed: ${out.error}` : null;
+        failed = out.error ?? null;
       } catch (e) {
-        this.error = `${what} failed: ${message(e)}`;
+        failed = message(e);
       }
+      // The error stays above the list; the toast says how it went either way.
+      this.error = failed ? `${verb} failed: ${failed}` : null;
+      try {
+        notify(failed ? { title: `${verb} failed`, body: `${name}\n${failed}`, level: "error" }
+          : { title: what === "retry" ? "Retrying" : "Canceled", body: name, level: "success" });
+      } catch {}
       this.acting = null;
       // pipeline-act dropped the cached answers: this fetches them again.
       this.refresh(cx, this.every(), false);
@@ -146,53 +160,44 @@ export default class CI extends View {
 
   jobList(p, t) {
     const jobs = this.jobs[p.id];
-    if (jobs === "loading" || jobs == null) return div().pl(22).py(2).text_size(11).text_color(t.dim).child("Loading jobs…");
-    if (!jobs.groups.length) {
-      return div().pl(22).py(2).text_size(11).text_color(jobs.error ? t.ansi1 : t.dim).child(jobs.error ?? "No jobs.");
-    }
-    return v_flex().pl(22).gap(1)
-      .when(Boolean(jobs.error), (e) => e.child(div().py(2).text_size(11).text_color(t.ansi1).child(jobs.error)))
+    const line = (text, color) => div().pl(20).py(2).text_size(11).text_color(color).child(text);
+    if (jobs === "loading" || jobs == null) return line("Loading jobs…", t.muted);
+    if (!jobs.groups.length) return line(jobs.error ?? "No jobs.", jobs.error ? t.ansi1 : t.muted);
+    return v_flex().pl(16).gap(1)
+      .when(Boolean(jobs.error), (e) => e.child(div().px(4).py(2).text_size(11).text_color(t.ansi1).truncate()
+        .tooltip(jobs.error).child(jobs.error)))
       .children(jobs.groups.flatMap(({ group, jobs }) => [
-        div().pt(3).text_size(10).text_color(t.dim).child(group),
+        div().px(4).pt(3).text_size(10).text_color(t.dim).child(group),
         ...jobs.map((j) =>
           h_flex().id(`job-${j.id}`).h(20).px(4).gap(6).items_center().rounded(4).text_size(11.5).cursor_pointer()
             .hover((s) => s.bg(t.hover))
             .on_click((_e, cx) => { cx.stop_propagation(); openUrl(exec, j.url); })
             .child(div().w(12).flex_none().text_color(this.color(t, j.status)).child(ICON[j.status] ?? "·"))
             .child(div().flex_1().min_w(0).truncate().child(j.name))
-            .when(j.allow_failure && j.status === "failed", (e) => e.child(div().text_size(10).text_color(t.ansi3).child("allowed")))
-            .child(div().flex_none().text_color(t.dim).child(clock(j.duration)))),
+            .when(j.allow_failure && j.status === "failed", (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi3).child("allowed")))
+            .child(div().flex_none().text_size(11).text_color(t.dim).child(clock(j.duration)))),
       ]));
   }
 
   render() {
     const t = theme(), { provider, host, repo, terms } = this.project;
-    const header = h_flex().h(34).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(div().font_semibold().child(terms.ci))
-      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(repo))
-      .when(this.usable(), (e) => e.child(div().id("ci-refresh").px(6).py(2).rounded(4).text_size(12).cursor_pointer()
-        .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .tooltip("Refresh")
-        .when(this.loading, (e) => e.loop("opacity", { from: 0.3, to: 1, period: 900 }))
-        .on_click((_e, cx) => this.refresh(cx, 0, true))
-        .child("↻")));
-
-    const button = (id, label, onClick) =>
-      div().id(id).flex_none().px(6).py(1).rounded(4).bg(t.raised).text_size(11).text_color(t.foreground).cursor_pointer()
-        .hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
-        .child(label);
+    const header = this.chrome.header(t, {
+      title: terms.ci, sub: repo, at: this.at ? this.at * 1000 : null, loading: this.loading,
+      onRefresh: this.usable() ? (cx) => this.refresh(cx, 0, true) : null,
+    });
+    if (this.chrome.collapsed()) return v_flex().id("ci").size_full().min_h(0).bg(t.background).child(header);
 
     const now = Date.now();
     let body;
-    if (!provider) body = div().p(12).text_color(t.muted).child(`${host} isn't a forge herdr-forge supports.`);
-    else if (!repo) body = div().p(12).text_color(t.muted).child("No repo set (props.repo).");
-    else if (this.error && !this.pipelines.length) body = div().p(12).text_size(12).text_color(t.ansi1).child(this.error);
-    else if (!this.pipelines.length) body = div().p(12).text_color(t.muted).child(this.loading ? "Loading…" : `No ${terms.ciRun}s.`);
+    if (!provider) body = note(t, `${host} isn't a forge herdr-forge supports.`);
+    else if (!repo) body = note(t, "No repo set (props.repo).");
+    else if (this.error && !this.pipelines.length) body = note(t, this.error, { error: true });
+    else if (!this.pipelines.length) body = note(t, this.loading ? "Loading…" : `No ${terms.ciRun}s.`);
     else body = v_flex().id("ci-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
-      .when(Boolean(this.error), (e) => e.child(div().px(8).py(4).text_size(11).text_color(t.ansi1).child(this.error)))
+      .when(Boolean(this.error), (e) => e.child(staleError(t, this.error)))
       .children(this.pipelines.map((p) => {
         const hovered = this.hovered === p.id, open = this.open.has(p.id);
+        const acting = this.acting === p.id;
         return v_flex().id(`pl-${p.id}`).px(8).py(6).gap(3).rounded(6).cursor_pointer()
           .when(open, (e) => e.bg(t.raised))
           .hover((s) => s.bg(t.hover))
@@ -203,14 +208,20 @@ export default class CI extends View {
           .on_click((_e, cx) => this.toggle(p, cx))
           .child(h_flex().gap(6).items_center()
             .child(div().w(14).flex_none().text_color(this.color(t, p.status)).child(ICON[p.status] ?? "·"))
-            .child(div().flex_none().text_size(13).font_semibold().child(p.ref ?? ""))
+            .child(div().flex_none().max_w(200).truncate().text_size(13).font_semibold().child(p.ref ?? ""))
             .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(p.sha?.slice(0, 8) ?? ""))
-            .when(this.acting === p.id, (e) => e.child(div().text_size(11).text_color(t.muted).child("…")))
-            .when(hovered && this.acting !== p.id, (e) => e
-              .when(LIVE.has(p.status), (e) => e.child(button(`cancel-${p.id}`, "Cancel", (cx) => this.act(p, "cancel", cx))))
-              .when(p.status === "failed" || p.status === "canceled", (e) => e.child(button(`retry-${p.id}`, "Retry", (cx) => this.act(p, "retry", cx))))
-              .child(button(`open-${p.id}`, "↗", () => openUrl(exec, p.url))))
-            .when(!hovered || this.acting === p.id, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(p.updated_ms, now)))))
+            .when(acting, (e) => e.child(div().flex_none().text_size(11).text_color(t.muted).child("Working…")))
+            .when(hovered && !acting, (e) => e
+              .when(LIVE.has(p.status), (e) => e.child(button(t, `cancel-${p.id}`, "Cancel", (cx) => this.act(p, "cancel", cx),
+                { tooltip: `Cancel this ${terms.ciRun}` })))
+              .when(p.status === "failed" || p.status === "canceled", (e) => e.child(button(t, `retry-${p.id}`, "Retry",
+                (cx) => this.act(p, "retry", cx), { tone: "primary", tooltip: "Retry the failed jobs" })))
+              .child(div().id(`open-${p.id}`).flex_none().w(20).h(20).rounded(4).flex().items_center().justify_center()
+                .text_size(12).text_color(t.muted).hover((s) => s.bg(t.raised).text_color(t.foreground))
+                .tooltip("Open in the browser")
+                .on_click((_e, cx) => { cx.stop_propagation(); openUrl(exec, p.url); })
+                .child("↗")))
+            .when(!hovered && !acting, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(ago(p.updated_ms, now)))))
           .child(h_flex().pl(20).gap(8).text_size(11).text_color(t.muted)
             .child(div().text_color(this.color(t, p.status)).child((p.status ?? "").replace(/_/g, " ")))
             .when(p.iid != null, (e) => e.child(div().text_color(t.dim).child(`#${p.iid}`)))
