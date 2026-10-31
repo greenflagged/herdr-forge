@@ -93,6 +93,8 @@ Some things to know about the agent buttons:
 
 ### Merging in order
 
+<img src="docs/merge-order.png" width="244" align="right" alt="Open MRs with merge-order chips (merge first, after !822, overlaps, 500 behind), then Merged lately with each merge's pipeline and Flux deploy">
+
 When several MRs are open at once, a line of chips under each one says where it stands against
 the others:
 
@@ -111,8 +113,11 @@ Claude Code in a worktree to rebase onto the target and renumber the migration, 
 If an agent already owns the MR, you get **✦ Ask to rebase** instead, which sends that agent the
 same request. Neither ever merges.
 
-Migrations are found by file name, Flyway style (`V12__add_index.sql`) by default. Set the panel's
-`migrations` prop to your own pattern, whose last group of digits is the version (for Django,
+Migrations are found by file name, Flyway style by default: `V12__add_index.sql`, or dotted
+versions like `V1.2__` and `V1_2__`, which compare as Flyway does (`V1_2__`, `V1.02__` and `V1.2.0__` are
+all version 1.2). Set the panel's
+`migrations` prop to your own pattern, whose last group of digits (dots or underscores allowed
+between them) is the version (for Django,
 `"(\\d{4})_\\w+\\.py$"`), or to `false` to turn this off. The panel checks all of this every 5
 minutes, with one call per open MR, and asks for an MR's files again only when its head changes.
 
