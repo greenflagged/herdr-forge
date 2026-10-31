@@ -119,7 +119,8 @@ export function agentPlaces(agentList, paneList, terminalList) {
     const machine = machineOf(a.address);
     out.set(a.address, {
       address: a.address, key: placeKey(machine, p.cwd), machine, cwd: p.cwd, branch: p.branch ?? null,
-      parent: null, pane: a.pane, status: a.status, program: a.program,
+      parent: null, pane: a.pane, tab: a.tab ?? p.tab ?? null, tabName: a.tab_name ?? null,
+      status: a.status, program: a.program,
       name: a.tab_name || a.space_name || a.program?.name || a.address,
     });
   }
@@ -128,17 +129,23 @@ export function agentPlaces(agentList, paneList, terminalList) {
     const machine = machineOf(k.address);
     out.set(k.address, {
       address: k.address, key: placeKey(machine, k.cwd), machine, cwd: k.cwd, branch: null,
-      parent: k.parent, pane: null, status: k.status === "error" ? "blocked" : k.status === "done" ? "idle" : k.status ?? null,
+      parent: k.parent, pane: null, tab: null, tabName: null, status: k.status === "error" ? "blocked" : k.status === "done" ? "idle" : k.status ?? null,
       program: k.program, name: k.name || k.template || k.program?.name || k.address,
     });
   }
   return out;
 }
 
-// What git said about a folder: "branch\nremote url" -> { branch, remote }.
+// Asks git about a folder: its branch, remote, HEAD, top folder, and whether that's a
+// linked worktree (its .git is a file) rather than the main checkout.
+export const GIT_LOOK = `t=$(git rev-parse --show-toplevel 2>/dev/null)
+printf '%s\\n%s\\n%s\\n%s\\n%s\\n' "$(git branch --show-current 2>/dev/null)" "$(git remote get-url origin 2>/dev/null)" \\
+  "$(git rev-parse HEAD 2>/dev/null)" "$t" "$([ -n "$t" ] && [ -f "$t/.git" ] && echo 1)"`;
+
+// What GIT_LOOK printed -> { branch, remote, head, top, linked }.
 export function parseGitLook(stdout) {
-  const [branch = "", remote = ""] = String(stdout ?? "").split("\n");
-  return { branch: branch.trim() || null, remote: remote.trim() || null };
+  const [branch = "", remote = "", head = "", top = "", linked = ""] = String(stdout ?? "").split("\n").map((l) => l.trim());
+  return { branch: branch || null, remote: remote || null, head: head || null, top: top || null, linked: linked === "1" };
 }
 
 // The places working on request r. git: Map key -> { branch, remote }. A pane's live
@@ -179,3 +186,118 @@ export function askText(kind, r, terms) {
     ? `${ref} has conflicts with ${r.target ?? "its target branch"}. Rebase it, resolve them, push, and tell me when it's clean. Don't merge.`
     : `Get ${ref} ready and merge it once CI passes. If something needs a decision, ask me first.`;
 }
+
+// ---- after a merge: deployed yet, then clean up ----
+// forge.py's `merged` lists what merged lately, with the merge commit's pipeline. A
+// project may add a deploy check (props.deploy, docs/actions.md): a shell snippet run in
+// its checkout with the merge commit as $1, exiting 0 once that commit is live, 1 until then.
+
+export const RECENT = 24 * 3600000;     // merged this lately: shown whether or not anyone's on it
+const NO_CI_GRACE = 10 * 60000;         // no pipeline this long after merging: there won't be one
+
+// The merged requests worth a row: recent ones, and older ones an agent is still on.
+export function shownMerged(merged, ownersOfReq, now) {
+  return (merged ?? []).filter((m) => now - m.merged_ms < RECENT || (!m.fork && ownersOfReq(m).length > 0));
+}
+
+// Where a merged request has got to. checks: Map merge sha -> { state: "yes"|"no"|"error", text }.
+// ci: the merge commit's CI status, or "none" (no pipeline, and there won't be one).
+// deploy: null without a check, else "waiting" (for CI), "checking", "yes", "no", "error", "blocked" (CI failed).
+// done: nothing more to wait for, so it's time to clean up.
+export function deployState(m, deploy, checks, now) {
+  const status = m.ci?.status ?? (now - m.merged_ms >= NO_CI_GRACE ? "none" : "pending");
+  const ciDone = status === "success" || status === "none";
+  const ciBad = status === "failed" || status === "canceled";
+  if (!deploy?.check) return { ci: status, deploy: null, done: ciDone };
+  const c = checks?.get(m.merge_sha);
+  const d = ciBad ? "blocked" : !ciDone ? "waiting" : c?.state ?? "checking";
+  return { ci: status, deploy: d, done: d === "yes", text: c?.text ?? null };
+}
+
+// Should this merged request's deploy check run now? Only once its CI is through, never
+// again once it says yes, and not more than every `every` ms otherwise.
+export function checkDue(m, deploy, checks, now, every) {
+  if (!deploy?.check || !m.merge_sha) return false;
+  const st = deployState(m, deploy, checks, now);
+  if (st.deploy === "waiting" || st.deploy === "blocked" || st.deploy === "yes") return false;
+  const c = checks?.get(m.merge_sha);
+  return !c || now - c.at >= every;
+}
+
+// What "Clean up" would do for a merged request m, from its owners (ownersOf), every place
+// (agentPlaces), panes() and terminals(), and what git said about each folder.
+// { blocked: why not | null, tabs: [{ id, name }] to close, kills: [{ address, name }] to end,
+//   worktrees: [{ machine, top, branch }] to remove, kept: [{ top, why }] }
+export function cleanupPlan(m, owners, places, paneList, terminalList, git) {
+  const plan = { blocked: null, tabs: [], kills: [], worktrees: [], kept: [] };
+  if (!owners.length) return plan;
+  const owning = new Set(owners.map((o) => o.address));
+  // Ending an agent ends its sub-agents too: none of them may be busy.
+  const kids = (terminalList ?? []).filter((k) => k.state === "live" && owning.has(k.parent));
+  const statusOf = (x) => places.get(x.address)?.status ?? (x.status === "error" ? "blocked" : x.status);
+  const busy = [...owners, ...kids].find((x) => ["working", "blocked"].includes(statusOf(x)));
+  if (busy) {
+    const name = places.get(busy.address)?.name ?? busy.name ?? busy.address;
+    plan.blocked = `${name} is ${statusOf(busy) === "blocked" ? "waiting for you" : "still working"}`;
+    return plan;
+  }
+  const tops = new Map(); // place key -> git look
+  for (const o of owners) {
+    const g = git.get(o.key);
+    if (g?.top) tops.set(JSON.stringify([o.machine, g.top]), { machine: o.machine, ...g });
+  }
+  const inside = (cwd, top) => cwd === top || cwd?.startsWith(top.endsWith("/") ? top : `${top}/`);
+  for (const o of owners) {
+    if (o.parent && owning.has(o.parent)) continue; // its parent's ending covers it
+    const top = git.get(o.key)?.top;
+    // A tab of nothing but this worktree's terminals goes with it; otherwise just the agent.
+    const tabPanes = o.tab ? (paneList ?? []).filter((p) => p.tab === o.tab && p.terminal) : [];
+    if (o.tab && top && tabPanes.length && tabPanes.every((p) => inside(p.cwd, top))) {
+      if (!plan.tabs.some((t) => t.id === o.tab)) plan.tabs.push({ id: o.tab, name: o.tabName ?? o.name });
+    } else {
+      plan.kills.push({ address: o.address, name: o.name ?? o.address });
+    }
+  }
+  for (const g of tops.values()) {
+    if (!g.linked) plan.kept.push({ top: g.top, why: "the main checkout" });
+    else if (g.branch !== m.source) plan.kept.push({ top: g.top, why: `on ${g.branch ?? "no branch"}, not ${m.source}` });
+    else if (m.head_sha && g.head !== m.head_sha) plan.kept.push({ top: g.top, why: "it has commits that weren't merged" });
+    else plan.worktrees.push({ machine: g.machine, top: g.top, branch: g.branch });
+  }
+  return plan;
+}
+
+// Why a merged request isn't through yet, in words, or null when it is (deployState).
+export function notDoneWhy(st, deploy, terms) {
+  if (st.done) return null;
+  const label = deploy?.label ?? "Deploy";
+  if (st.ci === "failed" || st.ci === "canceled") return `${terms.ciRun} ${st.ci} on the merge commit`;
+  if (!deploy?.check || st.deploy === "waiting") return `${terms.ciRun} still running on the merge commit`;
+  if (st.deploy === "error") return `${label} check failed${st.text ? `: ${st.text}` : ""}`;
+  return `${label} hasn't confirmed it yet${st.text ? ` (${st.text})` : ""}`;
+}
+
+// The confirm's lines: a warning when it isn't deployed, then exactly what goes, and
+// what stays and why.
+export function cleanupLines(plan, why = null) {
+  const out = why ? [`Not deployed: ${why}`] : [];
+  for (const t of plan.tabs) out.push(`Close tab ${t.name} and its agent`);
+  if (plan.kills.length) out.push(`End ${plan.kills.map((k) => k.name).join(", ")}`);
+  for (const w of plan.worktrees) out.push(`Remove worktree ${w.top} and branch ${w.branch}`);
+  for (const k of plan.kept) out.push(`Keep ${k.top}: ${k.why}`);
+  return out;
+}
+
+// Removes one worktree and its branch: sh -c CLEAN_WORKTREE sh <worktree> <branch> <merged head>.
+// Checks again first (it's still a linked worktree, on that branch, at the commit that
+// merged); `git worktree remove` without --force refuses changes and untracked files.
+// Prints why on failure (exit 3: refused before touching anything).
+export const CLEAN_WORKTREE = `wt=$1 br=$2 head=$3
+[ -f "$wt/.git" ] || { echo "$wt isn't a linked worktree"; exit 3; }
+[ "$(git -C "$wt" branch --show-current)" = "$br" ] || { echo "$wt isn't on $br any more"; exit 3; }
+[ -z "$head" ] || [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] || { echo "$wt has commits that weren't merged"; exit 3; }
+main=$(git -C "$wt" worktree list --porcelain | sed -n '1s/^worktree //p')
+[ -n "$main" ] || { echo "can't find the main checkout of $wt"; exit 3; }
+git -C "$main" worktree remove "$wt" 2>&1 || exit 4
+git -C "$main" branch -D "$br" >/dev/null 2>&1 || { echo "removed $wt; couldn't delete branch $br"; exit 5; }
+echo "removed $wt and $br"`;

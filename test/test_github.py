@@ -1,5 +1,5 @@
 """forge.py's GitHub provider against a fake gh, in a throwaway HOME."""
-import json, os, subprocess, sys, tempfile, unittest
+import json, os, subprocess, sys, tempfile, time, unittest
 
 from test_forge import FAKES, NOW, SCRIPT, iso
 
@@ -98,6 +98,22 @@ class GitHub(unittest.TestCase):
         self.assertEqual(b["ci"]["status"], "failed")
         self.assertIsNone(c["ci"], "no checks at all")
         self.assertEqual(len(self.calls()), 1, "one call: the checks come with the PRs")
+
+    def test_merged_pull_requests_carry_their_merge_commits_checks(self):
+        now = time.time() * 1000
+        def merged(n, at, commit):
+            return {**pr(n), "mergedAt": iso(at), "mergeCommit": commit}
+        self.routes([[r"pullRequests\(states:MERGED", repo(pullRequests=conn([
+            merged(7, now - 3600000, {"oid": "m7", "statusCheckRollup": {"state": "PENDING"}}),
+            merged(8, now - 600000, {"oid": "m8", "statusCheckRollup": None}),
+            merged(9, now - 30 * DAY, {"oid": "m9", "statusCheckRollup": None})]))]])
+        out = self.run_forge("merged", *P, 60, 0)
+        self.assertIsNone(out["error"])
+        b, a = out["merged"]
+        self.assertEqual((a["iid"], a["merge_sha"], a["head_sha"], a["source"]), (7, "m7", "sha7", "b7"))
+        self.assertEqual((a["ci"]["status"], a["ci"]["url"]), ("running", f"{URL}/commit/m7"))
+        self.assertIsNone(b["ci"], "no checks on the merge commit")
+        self.assertEqual(len(out["merged"]), 2, "a month-old merge is left out")
 
     def test_merge_uses_a_method_the_repo_allows(self):
         self.routes([[r"-X PUT .*repos/acme/shop/pulls/7/merge", {"out": {"merged": True, "message": "Pull Request successfully merged"}}],

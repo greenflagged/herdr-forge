@@ -76,6 +76,39 @@ class Forge(unittest.TestCase):
         self.run_forge("requests", *P, 60, 1)
         self.assertGreater(len(self.calls()), n, "force fetches again")
 
+    def test_merged_requests_carry_their_merge_commits_pipeline(self):
+        now = time.time() * 1000
+        self.routes([
+            [r"merge_requests\?state=merged&updated_after=", {"out": [
+                mr(7, merged_at=iso(now - 3600000), merge_commit_sha="m7"),
+                # Fast-forward: no merge commit, the head is what landed.
+                mr(8, merged_at=iso(now - 600000), merge_commit_sha=None),
+                mr(9, merged_at=iso(now - 9 * 86400000), merge_commit_sha="m9"),
+                mr(10, merged_at=None)]}],
+            [r"pipelines\?ref=main&per_page=50", {"out": [
+                {"id": 3, "sha": "m7", "status": "running", "web_url": "u3", "updated_at": iso(now)},
+                {"id": 2, "sha": "m7", "status": "failed", "web_url": "u2", "updated_at": iso(now - 1000)},
+                {"id": 1, "sha": "sha8", "status": "success", "web_url": "u1", "updated_at": iso(now)}]}],
+        ])
+        out = self.run_forge("merged", *P, 60, 0)
+        self.assertIsNone(out["error"])
+        self.assertEqual([r["iid"] for r in out["merged"]], [8, 7], "newest first; old and unmerged ones left out")
+        b, a = out["merged"]
+        self.assertEqual((a["merge_sha"], a["head_sha"], a["source"], a["target"]), ("m7", "sha7", "b7", "main"))
+        self.assertEqual(a["ci"]["id"], 3, "the newest pipeline for the merge commit")
+        self.assertEqual((b["merge_sha"], b["ci"]["status"]), ("sha8", "success"))
+        n = len(self.calls())
+        self.run_forge("merged", *P, 60, 0)
+        self.assertEqual(len(self.calls()), n, "a fresh answer comes from the cache")
+
+    def test_merge_drops_the_merged_list(self):
+        self.routes([[r"merge_requests\?state=merged", {"out": []}], [r"mr merge", {"out": "Merged"}]])
+        self.run_forge("merged", *P, 600, 0)
+        n = len(self.calls())
+        self.run_forge("merge", *P, 7, "sha7")
+        self.run_forge("merged", *P, 600, 0)
+        self.assertEqual(sum("state=merged" in c for c in self.calls()[n:]), 1)
+
     def test_every_panel_opening_a_new_database_at_once(self):
         # Seen live: seven panels opening a new database together got "database is locked".
         self.routes([[r".", {"out": []}]])
