@@ -1,0 +1,5 @@
+{
+  "global": {
+    "ctrl-shift-f": "mod.open:forge-window"
+  }
+}

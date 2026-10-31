@@ -13,9 +13,11 @@ const SIZES = "forge.sizes"; // shared: block id -> its size before collapsing
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 // Where a panel is and what its header can do there:
-//   block   a layout block: collapse in place (in a column), open as a pane, detach
+//   block   a layout block: collapse in place (to a bar in a column, a strip in a row),
+//           open as a pane, detach
 //   window  detached (props.dockTo): dock back
 //   pane    opened as a pane (props.asPane): Herdr's pane header closes and zooms it
+//   inside  part of a window's layout (the Forge window): that window's bar shows and hides it
 export class Chrome {
   // mod: this mod's folder name. match: the props that tell its blocks apart ({ repo }).
   constructor(mod, match = {}, { width = 380, height = 560 } = {}) {
@@ -38,6 +40,7 @@ export class Chrome {
   where() {
     const p = props() ?? {};
     if (p.overlay != null && p.dockTo) return "window";
+    if (p.overlay != null) return "inside";
     if (p.asPane) return "pane";
     return "block";
   }
@@ -50,7 +53,12 @@ export class Chrome {
 
   canCollapse() {
     const b = this.where() === "block" ? this.block() : null;
-    return Boolean(b && b.parent === "column");
+    return Boolean(b && (b.parent === "column" || b.parent === "row"));
+  }
+
+  // Collapsed in a row: a strip on its edge rather than a bar.
+  rail() {
+    return this.collapsed() && this.block()?.parent === "row";
   }
 
   collapsed() {
@@ -60,7 +68,7 @@ export class Chrome {
   // Whether this copy should poll: on screen and not collapsed.
   visible() {
     const where = this.where();
-    if (where === "window") return true;
+    if (where === "window" || where === "inside") return true;
     if (where === "pane") return isShown(null, this.mod, {}, { panes: panes(), spaces: spaces() });
     if (this.collapsed()) return false;
     return isShown(layout(), this.mod, this.match, { panes: panes(), spaces: spaces() });
@@ -108,6 +116,7 @@ export class Chrome {
   // The header. title: string; count, sub (the project), at (ms of the data), loading,
   // onRefresh(cx), extra: elements placed before the buttons (range pills, say).
   header(t, { title, count = null, sub = "", at = null, loading = false, onRefresh = null, extra = [] }) {
+    if (this.rail()) return this.railView(t, title, count);
     const where = this.where(), collapsed = this.collapsed(), canCollapse = this.canCollapse();
     const icon = (id, glyph, tip, onClick) => div().id(`${this.mod}-${id}`).w(20).h(20).flex_none().rounded(4)
       .flex().items_center().justify_center().text_size(12).text_color(t.muted).cursor_pointer()
@@ -136,6 +145,17 @@ export class Chrome {
       .when(where === "window", (e) => e.child(icon("dock", "↙", "Dock it back", () => this.dock())));
   }
 }
+
+// The collapsed strip of a panel in a row: ▸, then the title down the strip, then the
+// count. Text can't turn sideways here, so the letters stack. Click anywhere to expand.
+Chrome.prototype.railView = function (t, title, count) {
+  return v_flex().id(`${this.mod}-rail`).size_full().pt(10).gap(1).items_center().cursor_pointer()
+    .bg(t.chrome).hover((s) => s.bg(t.hover)).tooltip(`Show ${title}`)
+    .on_click((_e, cx) => this.toggleCollapse(cx))
+    .child(div().pb(6).text_size(10).text_color(t.dim).child("▸"))
+    .children([...title].map((ch) => div().text_size(11).font_semibold().text_color(t.muted).child(ch === " " ? "·" : ch)))
+    .when(count != null, (e) => e.child(div().pt(6).child(pill(t, String(count)))));
+};
 
 // ---- small parts ----
 
