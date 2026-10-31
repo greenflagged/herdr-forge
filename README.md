@@ -2,23 +2,25 @@
 
 Forge puts your GitLab project inside [Herdr](https://herdr.dev). You get open merge requests you can
 merge or hand to an agent, CI pipelines and runners, milestones, a velocity chart, and a full issue
-browser that starts agents on issues. Press **ctrl-shift-f** and a Forge window opens on the repo of
-the terminal you're in.
+browser that starts agents on issues. Press **ctrl-shift-f** and the whole window turns into Forge
+for the repo of the terminal you're in.
 
 GitLab (gitlab.com and self-hosted) for now. GitHub support comes next.
 
-![The Forge window: merge requests, milestones and velocity on the left, then pipelines, runners and the issue browser with an issue open](preview.png)
+![Forge: merge requests, milestones and velocity on the left, then pipelines, runners and the issue browser with an issue open](preview.png)
 
-## The Forge window
+## Forge
 
-**ctrl-shift-f** opens a floating window with every panel for the repo of the focused terminal, and
-closes it again. It moves to another repo when you focus a terminal there. **Pinned** keeps it on one
-project. The switches in its bar show and hide panels. The window stays where you drop it and comes
-back after a restart.
+**ctrl-shift-f** switches the whole Herdr window to Forge, with every panel for the repo of the
+focused terminal. Press it again, or **Back** in the bar, to return to your layout. **Other project**
+in the bar opens the repo of another space.
+
+Click a panel's header to collapse it in place, and again to bring it back. Hover the header for ⧉,
+which opens the panel as a pane beside your terminals, and ↗, which detaches it into its own window.
+Herdr remembers the sizes you choose.
 
 You can also put any panel in your own layout (see [Panels in your layout](#panels-in-your-layout)).
-There, a panel can collapse to its header, open as a pane beside your terminals (⧉), or detach into
-its own window (↗).
+Panels there work the same way.
 
 ## Merge requests and CI
 
@@ -91,7 +93,7 @@ Then add the key from `herdr-forge/keys.json` to your `~/.config/herdr-app/keys.
 "global": { "ctrl-shift-f": "mod.open:forge-window" }
 ```
 
-Install the mods on the machine that runs the Herdr window. The Forge window finds `glab` on the
+Install the mods on the machine that runs the Herdr window. Forge finds `glab` on the
 machine of the terminal you're in.
 
 ### Settings

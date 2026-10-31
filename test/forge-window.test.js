@@ -6,8 +6,10 @@ import { PANELS, forgeLayout, parseConfig, projectFrom, withConfig } from "../mo
 const project = { provider: "gitlab", host: "gitlab.com", repo: "acme/shop", on: "mac", folder: "/src/shop" };
 const mods = (node) => node.content ? [node.content.mod] : (node.children ?? []).flatMap(mods);
 
-test("the window holds every panel under its bar, with the project's props", () => {
+test("the Forge layout holds every panel under its bar, with the project's props", () => {
   const l = forgeLayout(project);
+  assert.equal(l.id, "root");
+  assert.deepEqual(l.children[1].children.map((n) => n.id), ["forge-left", "forge-ci", "forge-runners", "forge-issues"]);
   assert.deepEqual(mods(l), ["forge-window", ...PANELS.map((p) => p.mod)]);
   const blocks = l.children[1].children.flatMap((n) => n.children ?? [n]);
   const issues = blocks.find((b) => b.content.mod === "forge-issues").content.props;
@@ -20,16 +22,11 @@ test("the window holds every panel under its bar, with the project's props", () 
   assert.equal(velocity.repo, "acme/shop");
 });
 
-test("hidden panels are left out, and an empty left column goes", () => {
-  const l = forgeLayout(project, ["requests", "milestones", "velocity", "runners"]);
-  assert.deepEqual(mods(l), ["forge-window", "forge-ci", "forge-issues"]);
-});
-
 test("forge.json adds per-project props and machine", () => {
   const config = parseConfig(JSON.stringify({ projects: { "gitlab.com/acme/shop": { on: "vps", issues: { triage: true } } } }));
   const p = withConfig(project, config);
   assert.equal(p.on, "vps");
-  const blocks = forgeLayout(p, [], config).children[1].children.flatMap((n) => n.children ?? [n]);
+  const blocks = forgeLayout(p, config).children[1].children.flatMap((n) => n.children ?? [n]);
   const issues = blocks.find((b) => b.content.mod === "forge-issues").content.props;
   assert.equal(issues.triage, true);
   assert.equal(issues.on, "vps");

@@ -1,7 +1,7 @@
 # Forge
 
-GitLab panels for Herdr. Press ctrl-shift-f to open a floating Forge window. It holds every panel
-for the repo of the focused terminal:
+GitLab panels for Herdr. Press ctrl-shift-f and the whole window becomes Forge: every panel for the
+repo of the focused terminal:
 
 - open merge requests, which you can merge or hand to an agent
 - pipelines
@@ -16,16 +16,15 @@ The same panels also work as blocks in any layout.
 
 ## What you see
 
-**The Forge window** (key `forge`, 90% × 88% of the window, floating, kept across restarts):
+**The Forge layout** (`layouts/forge.json`, written for the project each time Forge opens):
 
-- A 36 px bar on `chrome`, with a 1 px `border` line below. From the left it holds:
-  - "Forge" (13 px semibold).
-  - The project path (12.5 px).
+- A 38 px bar on `chrome`, with a 1 px `border` line below. From the left it holds:
+  - "Forge" (13.5 px semibold).
+  - The project path (13 px).
   - The host, when it isn't gitlab.com (11 px `dim`).
   - A pill with the machine ("this computer" when local).
-  - A Pinned / Following focus button (solid when pinned).
-  - On the right, one switch per panel (MRs, Milestones, Velocity, CI, Runners, Issues), `selected`
-    when shown and `dim` when hidden, and a × close.
+  - "Other project ▾": a list of the open spaces, each with its machine; picking one opens its repo.
+  - On the right, "ctrl-shift-f" in 11 px `dim` and a "Back to ‹layout›" button.
 - Below the bar, a row of columns. The first is 360 px and holds MRs, Milestones and Velocity
   (330 px tall). Then come CI (330 px) and Runners (290 px). Issues fills the rest. 1 px `border` dividers
   sit between them.
@@ -65,10 +64,10 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
 
 ## How it behaves
 
-- ctrl-shift-f toggles the Forge window. It opens on the focused terminal's repo. The terminal's
-  origin remote names the project, the terminal's machine runs `glab`, and the terminal's checkout is
-  where agents start. The window follows focus to other repos unless pinned, and reopens with the
-  panel switches you chose.
+- ctrl-shift-f switches the window to the Forge layout for the focused terminal's repo, and back to
+  the layout you came from. The terminal's origin remote names the project, the terminal's machine
+  runs `glab`, and the terminal's checkout is where agents start. Outside a repo, Forge opens the last
+  project. The layout file is only rewritten when the project changes.
 - Clicking a header collapses the panel in place. In a column it shrinks to its header. In a row it
   shrinks to a 34 px strip with the title's letters stacked. Collapsed and hidden panels stop polling.
 - Panels poll only while on screen: MRs every 60 s, CI every 10 s while a recent pipeline runs and the
@@ -103,8 +102,8 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
   fetch lease and a per-host rate-limit pause.
   `forge.py` also does the filtering, sorting and bucketing. docs/contract.md has every command and
   shape.
-- Herdr: `exec`, `readTextFile`, `openOverlay` (window with `key`, `keep`, `layout`), `closeOverlay`,
-  `run` (`layout.resize`, `layout.hide`, `layout.show`, `pane.split`, `tab.new`, `space.new`),
+- Herdr: `exec`, `readTextFile`, `writeTextFile` (the Forge layout), `openOverlay` (detached panels: a window with `key`, `keep`), `closeOverlay`,
+  `run` (`layout.switch`, `layout.resize`, `layout.hide`, `layout.show`, `pane.split`, `tab.new`, `space.new`),
   `shared`/`setShared`, `knownAgents`, `notify`, `layout()`, `panes()`, `spaces()`, `focused()`,
   `Popover` for dropdowns, `v_virtual_list` with a scroll handle, `h_resizable`, `TextView.markdown`.
 - keys.json: `"ctrl-shift-f": "mod.open:forge-window"`. Settings: optional `forge.json` in Herdr's
@@ -125,8 +124,8 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
 
 ## Done when
 
-- ctrl-shift-f in a GitLab repo's terminal opens the window on that project. Pressing it again
-  closes the window. The window comes back after restarting Herdr.
+- ctrl-shift-f in a GitLab repo's terminal switches to Forge for that project; pressing it again (or
+  Back) returns to the previous layout. Other project opens another space's repo.
 - Each panel shows its data, and after a restart shows it at once from the cache.
 - Clicking a header collapses it; clicking again restores its size.
 - A filter click in Issues narrows the list and the counts; a priority change shows at once and in
