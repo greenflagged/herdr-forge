@@ -699,6 +699,35 @@ class Forge(unittest.TestCase):
         self.run_forge("milestones", *P, 600, 0)
         self.assertGreater(len(self.calls()), n)
 
+    def relabel_routes(self, issues, labels):
+        page = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [{"iid": str(i["iid"])} for i in issues]}
+        self.routes([[r"issues\?scope=all", {"out": issues}],
+                     [r"/labels", {"out": [{"name": l, "color": "#fff"} for l in labels]}],
+                     [r"milestones\?state=active", {"out": []}],
+                     [r"graphql", {"out": {"data": {"project": {"issues": page}}}}]])
+
+    def test_a_renamed_label_reads_every_issue_again(self):
+        # A rename keeps the issue's updated_at, so the change feed alone never brings it back.
+        self.sync_issues([issue(17, ["stream:bug"]), issue(18)], labels=["stream:bug"])
+        self.relabel_routes([issue(17, ["stream::bug"]), issue(18)], ["stream::bug"])
+        out = self.run_forge("sync", *P, 0, 1)
+        self.assertTrue(out["more"], "the caller is told to call again")
+        n = len(self.calls())
+        out = self.run_forge("sync", *P, 0, 0)
+        self.assertFalse(out["more"])
+        self.assertFalse(any("updated_after" in c for c in self.calls()[n:]), "the resync starts from the beginning")
+        counts = self.run_forge("query", *P, "{}")["counts"]
+        self.assertEqual(counts["scope:stream"], {"bug": 1, "(none)": 1})
+        self.assertNotIn("stream:bug", counts["labels"])
+        n = len(self.calls())
+        self.run_forge("sync", *P, 0, 1)
+        self.assertTrue(any("updated_after" in c for c in self.calls()[n:]), "then syncs carry on from the cursor")
+
+    def test_removing_an_unused_label_doesnt_resync(self):
+        self.sync_issues([issue(1, ["bug"])], labels=["bug", "wontfix"])
+        self.relabel_routes([issue(1, ["bug"])], ["bug"])
+        self.assertFalse(self.run_forge("sync", *P, 0, 1)["more"])
+
     def test_reconcile_drops_deleted_issues(self):
         self.sync_issues([issue(1), issue(2)])
         page = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [{"iid": "1"}]}

@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.2+61d9af3e8127"
+VERSION = "0.1.2+ffe0d7a9eb74"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -1781,7 +1781,9 @@ class Project:
         if force or self.meta("sync_more") or now - self.meta("last_sync", 0) >= MIN_GAP:
             try:
                 cursor = self.meta("cursor")
-                stored = dict(self.db.execute("SELECT iid, updated_at FROM issues"))
+                # A resync (see relabelled) rewrites every issue, changed or not.
+                full = self.meta("resync", False)
+                stored = {} if full else dict(self.db.execute("SELECT iid, updated_at FROM issues"))
                 for page in self.forge.issue_pages(cursor):
                     for i in page:
                         # The cursor is inclusive, so every sync sees the newest issue again:
@@ -1796,11 +1798,20 @@ class Project:
                         break
                 self.set_meta("last_sync", now)
                 self.set_meta("sync_more", more)
+                if full and not more:
+                    self.set_meta("resync", False)
                 self.db.commit()
                 if not more and (force or now - self.meta("meta_at", 0) >= META_EVERY):
-                    self.set_meta("labels", self.forge.labels())
+                    before = {l["name"] for l in self.meta("labels", [])}
+                    labels = self.forge.labels()
+                    self.set_meta("labels", labels)
                     self.set_meta("milestones", self.forge.active_milestones())
                     self.set_meta("meta_at", now)
+                    if self.relabelled(before - {l["name"] for l in labels}):
+                        self.set_meta("cursor", None)
+                        self.set_meta("resync", True)
+                        self.set_meta("sync_more", True)
+                        more = True
                     self.db.commit()
                 if not more and not over_budget() and (force or now - self.meta("reconcile_at", 0) >= RECONCILE_EVERY):
                     gone = self.reconcile()
@@ -1818,6 +1829,15 @@ class Project:
         return {"now": now, "last_sync": self.meta("last_sync", 0), "error": error, "changed": changed, "more": more,
                 "triage_at": self.db.execute("SELECT max(at) FROM triage").fetchone()[0] or 0,
                 "triage_run": self.meta("triage_run")}
+
+    def relabelled(self, gone):
+        """Renaming or deleting a label doesn't change its issues' updated_at, so the change
+        feed never returns them and the cache keeps the old name. True when a cached issue
+        holds a label the project had at the last look and no longer has: the caller then
+        reads every issue again."""
+        if not gone:
+            return False
+        return any(gone.intersection(json.loads(r[0])) for r in self.db.execute("SELECT labels FROM issues"))
 
     def reconcile(self):
         """Deleted issues don't show in the change feed: drop what the forge no longer has.
