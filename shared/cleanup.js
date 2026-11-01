@@ -121,7 +121,8 @@ export function cleanupPlan(m, owners, places, paneList, terminalList, git, left
   for (const g of tops.values()) {
     if (!g.linked) plan.kept.push({ top: g.top, why: "the main checkout" });
     else if (g.branch !== m.source) plan.kept.push({ top: g.top, why: `on ${g.branch ?? "no branch"}, not ${m.source}` });
-    else if (m.head_sha && g.head !== m.head_sha) plan.kept.push({ top: g.top, why: "it has commits that weren't merged" });
+    else if (!m.head_sha) plan.kept.push({ top: g.top, why: "the request's head commit is unknown" });
+    else if (g.head !== m.head_sha) plan.kept.push({ top: g.top, why: "it has commits that weren't merged" });
     else plan.worktrees.push({ machine: g.machine, top: g.top, branch: g.branch });
   }
   // Left behind with no agent. A terminal open in one (a shell, say) keeps it: removing
@@ -135,7 +136,8 @@ export function cleanupPlan(m, owners, places, paneList, terminalList, git, left
     const open = (paneList ?? []).some((p) => !going.has(p.tab) && !ending.has(p.terminal) && inside(p.cwd, w.top))
       || (terminalList ?? []).some((k) => k.state === "live" && !ending.has(k.address) && inside(k.cwd, w.top));
     if (open) plan.kept.push({ top: w.top, why: "a terminal is open in it" });
-    else if (m.head_sha && w.head !== m.head_sha) plan.kept.push({ top: w.top, why: "it has commits that weren't merged" });
+    else if (!m.head_sha) plan.kept.push({ top: w.top, why: "the request's head commit is unknown" });
+    else if (w.head !== m.head_sha) plan.kept.push({ top: w.top, why: "it has commits that weren't merged" });
     else plan.worktrees.push({ machine, top: w.top, branch: w.branch });
   }
   return plan;
@@ -163,13 +165,15 @@ export function cleanupLines(plan, why = null) {
 }
 
 // Removes one worktree and its branch: sh -c CLEAN_WORKTREE sh <worktree> <branch> <merged head>.
-// Checks again first (it's still a linked worktree, on that branch, at the commit that
-// merged); `git worktree remove` without --force refuses changes and untracked files.
+// Checks again first (it's still a linked worktree, on that branch, and the merged head is
+// known and is the commit it's at); `git worktree remove` without --force refuses changes
+// and untracked files.
 // Prints why on failure (exit 3: refused before touching anything).
 export const CLEAN_WORKTREE = `wt=$1 br=$2 head=$3
 [ -f "$wt/.git" ] || { echo "$wt isn't a linked worktree"; exit 3; }
 [ "$(git -C "$wt" branch --show-current)" = "$br" ] || { echo "$wt isn't on $br any more"; exit 3; }
-[ -z "$head" ] || [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] || { echo "$wt has commits that weren't merged"; exit 3; }
+[ -n "$head" ] || { echo "the merged head commit of $wt is unknown: refusing"; exit 3; }
+[ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] || { echo "$wt has commits that weren't merged"; exit 3; }
 main=$(git -C "$wt" worktree list --porcelain | sed -n '1s/^worktree //p')
 [ -n "$main" ] || { echo "can't find the main checkout of $wt"; exit 3; }
 git -C "$main" worktree remove -- "$wt" 2>&1 || exit 4
