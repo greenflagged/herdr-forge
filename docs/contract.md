@@ -15,11 +15,18 @@ any of them; the README covers using the mods.
 | `forge-issues` | A full issue browser, opened as a tab; optional triage agent | `sync`, `meta`, `query`, `show`, `update`, `comment`, `launch`, triage ones |
 | `forge-toggle` | A bar that shows or hides a hidden panel, or opens a mod's tab | none |
 
-Every mod folder holds `main.js`, `mod.json`, `lib.js` and (except `forge-toggle`)
-`forge.py`. `lib.js` and `forge.py` are copies of `shared/`; never edit the copies.
+Every mod folder holds `main.js`, `mod.json`, `lib.js`, `ui.js` and (except `forge-toggle`)
+`forge.py`; a mod whose own files import `./agents.js` or `./cleanup.js` gets those too
+(today only `forge-requests`). These are copies of `shared/`; never edit the copies.
 `npm run sync` writes them (stamping forge.py's `VERSION` as `<package version>+<hash>`),
-and `npm test` fails when one is out of date. Machines that run forge.py must be POSIX
-(macOS, Linux) with `python3`.
+and `npm test` fails when one is out of date, or when a mod holds a copy of `agents.js` or
+`cleanup.js` it doesn't import. Machines that run forge.py must be POSIX (macOS, Linux)
+with `python3`. `lib.js` imports Herdr's Node-compatible `zlib` and `buffer` modules;
+tested on gpui-shell 0.7.1 / herdr-app 0.1.9.
+
+**Releases.** Bump `package.json`'s version whenever a shipped file changes what happens at
+install or run, not only when forge.py's text changes: Herdr never updates mods, and the
+release is the only thing that orders installs (0.1.1 did this for the packed install).
 
 ## Props every forge mod takes
 
@@ -71,6 +78,15 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
   `error`: with a cached answer, the data is the last good one, so show the data and the
   error. It throws only when python can't run or the output isn't JSON.
 - `nocli: true` with the error: the forge's CLI isn't installed on that machine.
+- **Installing.** The first call on a machine for a version gets `{"install": true}` from
+  the boot code, and `forgeClient` sends the script over once, packed
+  (`base64(zlib(forge.py))`, one argument; `test/lib.test.js` keeps it under Linux's
+  131,072-byte cap). `INSTALL` writes `forge-<version>.py` as the exact bytes the mod ships,
+  on any locale. The transport is private to one `lib.js` copy: `forgeClient` and `INSTALL`
+  always ship together, so an older mod sending raw and a newer one sending packed each
+  write `forge-<their version>.py` side by side. `lib.js` and `forge.py` are pinned as a
+  pair: sync them from the same commit. `forge-<version>.py` never changes once written,
+  so anything derived from it can be cached beside it under the same version.
 - Times are epoch milliseconds (`*_ms`) everywhere; never `Date.parse` in a render.
   On screen they're ages (`ago`) or the viewer's local time with its zone (`stamp`); due
   dates are `"YYYY-MM-DD"` calendar days, never parsed as UTC (see lib.js).
@@ -319,7 +335,7 @@ mixes PRs into issues). Mods must cope with the nulls:
 
 ## lib.js
 
-- `projectOf(props)`, `TERMS`, `providerForHost(host, forges)`, `parseRemote(url)`.
+- `projectOf(props)`, `TERMS`, `providerForHost(host, forges)`, `parseRemote(url)`, `CI` (a CI status -> `[glyph, themeColor, stillGoing]`).
 - `forgeClient(h, scriptPath)`: above.
 - `isShown(layout(), MOD, { repo }, { panes: panes(), spaces: spaces() })`: whether a copy
   of this mod is on screen: a layout block that isn't hidden, or a mod pane in the shown
@@ -369,7 +385,102 @@ Agents, skills and other people's mods will call these, so they only ever gain t
 - **Action fields** (actions.md) and **props** names.
 
 Internal, and free to change between releases: every other forge.py command (each mod
-runs its own pinned `forge-<version>.py`), the SQLite schema, `lib.js`.
+runs its own pinned `forge-<version>.py`), the SQLite schema, `lib.js`, `ui.js`. The
+shared JS modules other packages may sync have their own, provisional tier: below.
+
+## Sharing code with other packages (provisional, 0.x)
+
+Another package's mod (today herdr-workstream) can reuse the agent, deploy and Clean up
+logic instead of copying it: it syncs `shared/agents.js` and `shared/cleanup.js` into its
+mod folder, with the files they import. **This tier is provisional:** these names are what
+other packages call; they may change between releases, and each change is named in the PR
+that merges it. It is not part of "Stable for agents and other packages" above.
+
+- **Sync the set from one herdr-forge commit, and record it.** `lib.js`, `forge.py` (stamped
+  by `npm run sync`: take the copy from `mods/forge-requests/`), `ui.js` if used,
+  `agents.js`, `cleanup.js`. Never advance one without the others: `forgeClient` and
+  `INSTALL` are one pair, `lib.js` and `forge.py` another, and `cleanup.js` imports
+  `agents.js`. At one commit they work together; across commits nothing is promised.
+- **Run an imports test.** Each module exports `PROMISED`, the names other packages call
+  (`test/shared-api.test.js` checks them here). A consumer's own test imports its synced
+  copies and checks every name it uses is in `PROMISED`, so an update that renames one
+  fails there, not in a window.
+- **Promised:** in `agents.js` `lookState`, `placesOf`, `claimLooks`, `lookAt`, `ownersOf`,
+  `withShared`, `askTarget`, `liveAgents`; in `cleanup.js` `worktreeState`, `checkState`,
+  `worktreesDue`, `listWorktrees`, `seedChecks`, `claimChecks`, `checkDeploys`,
+  `planCleanup`, `emptyPlan`, `cleanupLines`, `runCleanup`, `deployState`, `notDoneWhy`,
+  `shownMerged`, `leftoversOf`; and the `Place`, `Plan` and three state shapes below.
+  Everything else they export (`machineOf`, `placeKey`, `agentPlaces`, `looksDue`,
+  `GIT_LOOK`, `parseGitLook`, `WORKTREE_LIST`, `parseWorktrees`, `checkDue`, `checkDeploy`,
+  `cleanupPlan`, `CLEAN_WORKTREE`, the `*_EVERY` and `RECENT` constants) is internal.
+- **How changes are made, when they must be:** a new `h` member is optional, with a
+  fallback when it's missing; a new argument goes at the end with a default; results only
+  gain fields. The request fields the modules read (`iid`, `url`, `title`, `source`,
+  `target`, `fork`, `head_sha`, `merge_sha`, `merged_ms`, `ci.status`, `deployed`) are
+  whatever that commit's forge.py returns.
+
+Neither module imports from Herdr: Herdr's functions come in as `h`, and no `cx` goes in.
+
+`agents.js`:
+
+- `Place = { address, key, machine, cwd, branch, parent, pane, tab, tabName, status, program, name }`:
+  a top-level agent (from `agents()` and `panes()`) or a live sub-agent (from
+  `terminals()`: `branch` null, `parent` set). `key` is the folder (`placeKey(machine, cwd)`).
+- `placesOf(h) -> Map<address, Place>`, empty if Herdr throws. `h: { agents, panes, terminals }`.
+- `lookState() -> { git: Map<key, { branch, remote, head, top, linked, at }>, looking }`.
+- `claimLooks(look, h, now?) -> [Place]`: the places whose git look is due (one per folder;
+  1 min for sub-agents, 10 min for panes, which report their branch). `[]` at once while a
+  look runs; a non-empty claim marks one running.
+- `async lookAt(due, look, h)`: runs `GIT_LOOK` in each, one at a time; on failure keeps the
+  old entry with a fresh `at`. Never rejects; ends the claim. `h: { exec }`.
+- `ownersOf(r, places, look.git, project) -> [Place]`: the places on the request's source
+  branch in a checkout of `project.repo` (never a fork's request). `withShared(owners,
+  shared("forge.requestAgents")?.[r.url], places)` adds the agents another mod lists on it,
+  marked `shared: true`. `askTarget(owners, places) -> Place | null`: who to type to.
+  `liveAgents(list, byAgent, byTerminal)`: a `forge.requestAgents` list with live status.
+
+`cleanup.js`:
+
+- `shownMerged(merged, ownersOfReq, now, leftoversOfReq)`: the merged requests worth a row.
+  `leftoversOf(m, worktrees.list)`: the worktrees still on `m`'s branch.
+- `worktreeState() -> { list, at, folder, machine, pending }`;
+  `worktreesDue(w, merged, now?) -> bool`; `async listWorktrees(w, { folder, on }, h)`: one
+  `git worktree list` in the checkout; returns at once while one runs; never rejects.
+- `checkState() -> { checks: Map<mergeSha, { state, text, at }>, checking }`.
+  `seedChecks(merged, cs)`: marks the ones forge.py already says deployed.
+  `claimChecks(shown, props.deploy, cs, now?) -> [Merged]`: the deploy checks due; `[]`
+  without a check or while a run goes; a non-empty claim marks one going.
+  `async checkDeploys(due, { project, deploy, folder, cs }, h, onEach?)`: runs each check
+  (exit 0 deployed, 1 not yet, else failed), tells forge.py `deployed` on a yes, and calls
+  `h.notify` (optional) when one that said otherwise turns yes. Never rejects; ends the
+  claim. `h: { exec, forge, notify? }`.
+- `deployState(m, deploy, cs.checks, now) -> { ci, deploy, done, text }`;
+  `notDoneWhy(st, deploy, terms)`: why it isn't through, in words, or null.
+- `Plan = { blocked, tabs: [{ id, name }], kills: [{ address, name }], worktrees: [{ machine, top, branch }], kept: [{ top, why }] }`.
+  `async planCleanup(m, owners, { project, folder, look, worktrees, listed }, h) -> Plan`:
+  waits for a running listing, lists again, looks at the owners' folders again, then
+  works out what goes. `h: { exec, agents, panes, terminals }`. `emptyPlan(plan)`;
+  `cleanupLines(plan, why?)`: the confirm's lines (`why`: `notDoneWhy`'s answer).
+  `async runCleanup(m, plan, { look, worktrees }, h) -> { said, failed }`: closes tabs,
+  ends agents, removes worktrees (checking each again). Never rejects. `h: { exec, run, sleep }`.
+
+What a consumer must do (the modules can't check these):
+
+1. Keep one `lookState()`, `checkState()` and `worktreeState()` per view and pass the same
+   ones everywhere; never reset `looking`, `checking` or `pending` yourself.
+2. Per tick, before any `cx.spawn`: `claimLooks` (skip it when nothing is on screen),
+   `worktreesDue` then `listWorktrees`, `claimChecks` then `checkDeploys`. Spawn only on a
+   non-empty claim. A non-empty claim must be handed to exactly one `lookAt` /
+   `checkDeploys` call, even if you then bail (passing `[]` releases it).
+3. Call `seedChecks(merged, cs)` right after storing a new merged list, so the next render
+   already shows "Deployed" (`claimChecks` seeds too, so a missed call costs one render).
+4. Pass `h.notify` to `checkDeploys` for the "Deployed" notification, and `onEach` to redraw.
+5. Clean up is two calls: `planCleanup`, show `plan.blocked`, nothing (`emptyPlan`) or
+   `cleanupLines(plan)`, then on confirm `runCleanup` and word `{ said, failed }` yourself.
+6. Never parse `GIT_LOOK`, `WORKTREE_LIST` or `CLEAN_WORKTREE` output yourself.
+7. Sync the set from one commit (above).
+
+`mods/forge-requests/main.js` is the worked example.
 
 ## Mixed versions
 

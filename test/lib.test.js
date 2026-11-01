@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  actionList, checkoutOf, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf,
+  actionList, checkoutOf, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, packScript, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf,
 } from "../shared/lib.js";
 
 test("projectOf defaults to GitLab and infers the provider from the host", () => {
@@ -191,7 +191,10 @@ test("forgeClient's boot and install code runs under real python", async () => {
   const home = mkdtempSync(`${tmpdir()}/forge-`);
   const source = readFileSync(new URL("../shared/forge.py", import.meta.url), "utf8");
   const as = (v) => source.replace(/^VERSION = "[^"]*"/m, `VERSION = "${v}"`);
-  const exec = (bin, args) => new Promise((resolve, reject) => execFile(bin, args, { env: { HOME: home, PATH: process.env.PATH } },
+  // An ASCII-only locale with UTF-8 mode off: a text read or write of forge.py (it has a
+  // non-ASCII line) would fail here, so this proves boot and INSTALL handle it as bytes.
+  const exec = (bin, args) => new Promise((resolve, reject) => execFile(bin, ["-X", "utf8=0", ...args],
+    { env: { HOME: home, PATH: process.env.PATH, LC_ALL: "C" } },
     (err, stdout, stderr) => (err && err.code === "ENOENT" ? reject(err) : resolve({ code: err?.code ?? 0, stdout, stderr }))));
   const dir = `${home}/.local/share/herdr-forge`;
 
@@ -200,6 +203,8 @@ test("forgeClient's boot and install code runs under real python", async () => {
   const answers = await Promise.all(clients.map((f) => f(["version"])));
   assert.ok(answers.every((a) => a.version === "0.2.0+aa"), JSON.stringify(answers));
   assert.ok(existsSync(`${dir}/forge-0.2.0+aa.py`));
+  assert.deepEqual(readFileSync(`${dir}/forge-0.2.0+aa.py`), Buffer.from(as("0.2.0+aa")), "byte for byte what the mod ships");
+  assert.ok(/[^\x00-\x7f]/.test(source), "forge.py still has a non-ASCII line, or this proves less");
   assert.match(readFileSync(`${dir}/forge.py`, "utf8"), /VERSION = "0.2.0\+aa"/, "a stable path for agents");
   const { statSync } = await import("node:fs");
   assert.equal(statSync(dir).mode & 0o777, 0o700, "the folder (caches with issue text) is private");
@@ -223,12 +228,28 @@ test("forgeClient's boot and install code runs under real python", async () => {
 
 test("forge.py stays small enough to send as one argument", async () => {
   const { statSync } = await import("node:fs");
-  // Linux caps one argument at 131,072 bytes. What ships is the stamped mods/*/forge.py (9 bytes
-  // more than this file), sent raw as one argv entry (lib.js forgeClient, INSTALL): at this guard
-  // ~11 KB remains on a direct exec, and less if Herdr runs it through ssh / `sh -c` (quoting turns
-  // each ' into 4 bytes; unverified which transport it uses). Before the next sizeable feature,
-  // compress the install payload or send it in parts (lib.js INSTALL, sync.mjs).
-  assert.ok(statSync(new URL("../shared/forge.py", import.meta.url)).size < 120_000);
+  const { expected } = await import("../scripts/sync.mjs");
+  // Linux caps one argument at 131,072 bytes. What INSTALL gets is packScript(the stamped
+  // mods/*/forge.py), one argv entry. This measures Node's zlib; Herdr's packs the same text
+  // about 170 bytes smaller. Base64 needs no shell quoting (at most 2 bytes if Herdr's remote
+  // hop wraps it), and INSTALL itself is under 1 KB, so even one `sh -c` string stays under the cap.
+  const stamped = expected().get("mods/forge-requests/forge.py");
+  const packed = packScript(stamped);
+  assert.match(packed, /^[A-Za-z0-9+/=]+$/);
+  assert.ok(packed.length < 120_000, `${packed.length}`);
+  // Raw size: every forge.py call compiles the whole file (boot), so the cost of each spawn
+  // grows with it. Past this, decide on purpose (a bytecode cache, or splitting it up).
+  assert.ok(statSync(new URL("../shared/forge.py", import.meta.url)).size < 250_000);
+});
+
+test("sync copies agents.js and cleanup.js only into the mods that import them", async () => {
+  const { expected } = await import("../scripts/sync.mjs");
+  const out = expected();
+  assert.ok(out.has("mods/forge-requests/agents.js"));
+  assert.ok(out.has("mods/forge-requests/cleanup.js"));
+  assert.ok(!out.has("mods/forge-ci/agents.js"));
+  assert.ok(!out.has("mods/forge-ci/cleanup.js"));
+  assert.ok(out.has("mods/forge-ci/lib.js"), "lib.js still goes everywhere");
 });
 
 test("findBlocks and collapse sizes", () => {

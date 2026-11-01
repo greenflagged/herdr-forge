@@ -314,11 +314,12 @@ same cache.
 ## Develop
 
 ```sh
-npm test        # lib.js and the panels' logic under Node, forge.py against a fake glab and gh
-npm run sync    # after editing shared/: copies lib.js, ui.js and forge.py into every mod
+npm test        # test/*.test.js: lib.js and the panels' logic under Node; forge.py against a fake glab and gh
+npm run sync    # after editing shared/: copies lib.js, ui.js and forge.py into every mod, agents.js and cleanup.js into the mods that import them
 ```
 
 `shared/forge.py` does all the forge work and caching. `shared/lib.js` holds the logic the panels
-share, and `shared/ui.js` holds their look. Each mod carries copies, because Herdr mods can only
+share, and `shared/ui.js` holds their look. `shared/agents.js` and `shared/cleanup.js` find the
+agents on a request and run deploy checks and Clean up. Test fixtures live in `test/fixtures.js`. Each mod carries copies, because Herdr mods can only
 import from their own folder. [docs/contract.md](docs/contract.md) describes how the pieces fit
 together.

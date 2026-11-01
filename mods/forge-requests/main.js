@@ -3,12 +3,16 @@ import { v_flex, h_flex } from "gpui-base";
 import {
   exec, readTextFile, appHome, props, theme, shared, agents, terminals, panes, run, spaces, knownAgents, openOverlay, notify,
 } from "herdr";
-import { forgeClient, projectOf, actionList, matches, runAction, describe, actionLabel, fill, ago, agoAt, openUrl } from "./lib.js";
+import { CI, forgeClient, projectOf, actionList, matches, runAction, describe, actionLabel, fill, ago, agoAt, openUrl } from "./lib.js";
 import { Chrome, button, chip, note, pill, staleError } from "./ui.js";
+import { liveAgents, ownersOf, withShared, askTarget, placesOf, lookState, claimLooks, lookAt } from "./agents.js";
 import {
-  CI, defaultActions, mergeTip, mergeBlocked, checkoutOf, liveAgents, itemOf, agentPlaces, parseGitLook, ownersOf, withShared, askTarget, askText,
-  GIT_LOOK, shownMerged, deployState, checkDue, cleanupPlan, cleanupLines, notDoneWhy, CLEAN_WORKTREE,
-  WORKTREE_LIST, parseWorktrees, leftoversOf,
+  shownMerged, deployState, cleanupLines, notDoneWhy, leftoversOf, emptyPlan,
+  worktreeState, worktreesDue, listWorktrees, checkState, seedChecks, claimChecks, checkDeploys as runChecks,
+  planCleanup, runCleanup,
+} from "./cleanup.js";
+import {
+  defaultActions, mergeTip, mergeBlocked, checkoutOf, itemOf, askText,
   orderFacts, migrationPattern, clashText,
 } from "./requests.js";
 
@@ -27,13 +31,9 @@ const STATUS = { working: "Working", blocked: "Needs you", done: "Done", idle: "
 
 const message = (e) => String(e?.message ?? e);
 
-// Each agent folder's branch and remote (GIT_LOOK), looked up with git on the agent's machine.
-// A folder whose pane reports its branch only needs the remote, which rarely changes.
-const DEPLOY_EVERY = 60 * 1000;
-const ORDER_EVERY = 300;             // seconds: how far behind and changed files, per open request      // a deploy check that said "not yet" runs again after this
-const LOOK_EVERY = 60 * 1000;        // folders whose branch only git knows (sub-agents)
-const LOOK_EVERY_PANE = 10 * 60 * 1000;
-const WORKTREES_EVERY = 2 * 60 * 1000; // the checkout's worktrees, for ones merged work left behind
+const ORDER_EVERY = 300;             // seconds: how far behind and changed files, per open request
+// Herdr's functions the shared agent and cleanup flows use (agents.js, cleanup.js).
+const H = { exec, agents, panes, terminals };
 
 export default class ForgeRequests extends View {
   init(_props, cx) {
@@ -51,14 +51,12 @@ export default class ForgeRequests extends View {
     this.notice = null;     // { iid, text, error } from the last merge or action
     this.asked = 0;         // when we last asked forge.py (ms)
     this.drawn = 0;
-    this.git = new Map();     // place key -> { branch, remote, at }
-    this.looking = false;
+    this.look = lookState();  // git: place key -> { branch, remote, head, top, linked, at }
     this.merged = [];         // merged lately (forge.py `merged`), newest first
     this.mergedError = null;
-    this.checks = new Map();  // merge sha -> { state: "yes"|"no"|"error", text, at } from props.deploy
-    this.checking = false;
+    this.checks = checkState(); // checks: merge sha -> { state: "yes"|"no"|"error", text, at } from props.deploy
     this.shownMerged = [];    // the merged rows on screen, from the last render
-    this.worktrees = { list: [], at: 0, folder: null, listing: false, machine: null }; // the checkout's linked worktrees (parseWorktrees)
+    this.worktrees = worktreeState(); // the checkout's linked worktrees (parseWorktrees)
     this.order = null;        // forge.py `order`: { requests: {iid: {...}}, targets }
     this.facts = new Map();   // orderFacts from the last render
     this.refresh(cx, -1, false); // whatever is cached, however old: draw at once
@@ -75,35 +73,16 @@ export default class ForgeRequests extends View {
 
   // Where the agents are, from Herdr (cheap; read again on every render).
   places() {
-    try { return agentPlaces(agents(), panes(), terminals()); } catch { return new Map(); }
+    return placesOf(H);
   }
 
-  // Asks git about agent folders it hasn't seen, or not lately: one at a time, so a
-  // machine that's away holds up nothing else.
+  // Asks git about agent folders it hasn't seen, or not lately (agents.js lookAt).
   lookAtAgents(cx) {
-    if (this.looking || (!this.requests.length && !this.merged.length)) return;
-    const now = Date.now();
-    const due = [];
-    for (const pl of this.places().values()) {
-      const g = this.git.get(pl.key);
-      if (!g || now - g.at >= (pl.branch ? LOOK_EVERY_PANE : LOOK_EVERY)) due.push(pl);
-    }
+    if (!this.requests.length && !this.merged.length) return;
+    const due = claimLooks(this.look, H);
     if (!due.length) return;
-    this.looking = true;
     cx.spawn(async (cx) => {
-      const seen = new Set();
-      for (const pl of due) {
-        if (seen.has(pl.key)) continue;
-        seen.add(pl.key);
-        try {
-          const r = await exec("sh", ["-c", GIT_LOOK], { cwd: pl.cwd, on: pl.machine });
-          this.git.set(pl.key, { ...parseGitLook(r.stdout), at: Date.now() });
-        } catch {
-          // Machine away or folder gone: keep what we had, look again later.
-          this.git.set(pl.key, { ...(this.git.get(pl.key) ?? { branch: null, remote: null }), at: Date.now() });
-        }
-      }
-      this.looking = false;
+      await lookAt(due, this.look, H);
       cx.notify();
     });
   }
@@ -112,31 +91,14 @@ export default class ForgeRequests extends View {
   // gets Clean up for the worktree it left. One git call on the forge machine, every couple
   // of minutes while merged requests are listed.
   lookAtWorktrees(cx) {
-    if (this.worktrees.listing || !this.merged.length || Date.now() - this.worktrees.at < WORKTREES_EVERY) return;
-    cx.spawn(async (cx) => {
-      await this.listWorktrees();
-      cx.notify();
-    });
-  }
-
-  // The git call itself; Clean up awaits it directly so its plan sees the current list.
-  async listWorktrees() {
-    const w = this.worktrees;
-    if (w.listing) return;
+    if (!worktreesDue(this.worktrees, this.merged)) return;
     const p = props() ?? {};
     const project = projectOf(p);
     const folder = checkoutOf(p.folder, spaces(), project.on, project.repo);
-    if (!folder) { Object.assign(w, { list: [], at: Date.now() }); return; }
-    w.listing = true;
-    try {
-      const r = await exec("git", WORKTREE_LIST, { cwd: folder, on: project.on });
-      if (r.code === 0) Object.assign(w, { list: parseWorktrees(r.stdout), folder, machine: project.on ?? null });
-    } catch {
-      // Machine away: keep what we had, look again later.
-    } finally {
-      w.at = Date.now();
-      w.listing = false;
-    }
+    cx.spawn(async (cx) => {
+      await listWorktrees(this.worktrees, { folder, on: project.on }, H);
+      cx.notify();
+    });
   }
 
   // Types into the agent that owns a request (hc send: as if you typed it and pressed Enter).
@@ -162,44 +124,15 @@ export default class ForgeRequests extends View {
   }
 
   // Runs the project's deploy check (props.deploy.check) for merged requests on screen whose
-  // CI is through: one at a time, in the checkout, with the merge commit as $1.
-  // Exit 0: deployed. 1: not yet. Anything else: the check itself failed.
+  // CI is through: one at a time, in the checkout, with the merge commit as $1 (cleanup.js).
   checkDeploys(cx) {
     const p = props() ?? {};
-    if (!p.deploy?.check || this.checking) return;
-    const now = Date.now();
-    const due = this.shownMerged.filter((m) => checkDue(m, p.deploy, this.checks, now, DEPLOY_EVERY));
+    const due = claimChecks(this.shownMerged, p.deploy, this.checks);
     if (!due.length) return;
     const project = projectOf(p);
     const folder = checkoutOf(p.folder, spaces(), project.on, project.repo);
-    this.checking = true;
     cx.spawn(async (cx) => {
-      for (const m of due) {
-        let res;
-        if (!folder) res = { state: "error", text: "No checkout of the repo found (set props.folder)." };
-        else {
-          try {
-            const r = await exec("sh", ["-c", p.deploy.check, "sh", m.merge_sha], { cwd: folder, on: project.on });
-            const text = `${r.stdout ?? ""}\n${r.stderr ?? ""}`.trim().split("\n")[0] || null;
-            res = { state: r.code === 0 ? "yes" : r.code === 1 ? "no" : "error", text: text ?? (r.code > 1 ? `exited ${r.code}` : null) };
-          } catch (e) {
-            res = { state: "error", text: message(e) };
-          }
-        }
-        const was = this.checks.get(m.merge_sha)?.state;
-        this.checks.set(m.merge_sha, { ...res, at: Date.now() });
-        if (res.state === "yes") {
-          // Remembered on the forge machine, so a restart (or another window) doesn't check again.
-          const { provider, host, repo } = project;
-          try { await this.forge(["deployed", provider, host, repo, m.merge_sha, res.text ?? ""], { on: project.on }); } catch {}
-        }
-        if (res.state === "yes" && was && was !== "yes") {
-          const { terms } = projectOf(p);
-          try { notify({ title: `Deployed · ${terms.reqPrefix}${m.iid}`, body: m.title ?? "", level: "success" }); } catch {}
-        }
-        cx.notify();
-      }
-      this.checking = false;
+      await runChecks(due, { project, deploy: p.deploy, folder, cs: this.checks }, { exec, forge: this.forge, notify }, () => cx.notify());
     });
   }
 
@@ -210,23 +143,14 @@ export default class ForgeRequests extends View {
     this.notice = null;
     cx.notify();
     cx.spawn(async (cx) => {
-      while (this.worktrees.listing) await cx.sleep(100);
-      await this.listWorktrees();
-      for (const o of owners.filter((x) => !x.shared)) {
-        try {
-          const r = await exec("sh", ["-c", GIT_LOOK], { cwd: o.cwd, on: o.machine });
-          this.git.set(o.key, { ...parseGitLook(r.stdout), at: Date.now() });
-        } catch {}
-      }
-      const places = this.places();
-      const project = projectOf(props() ?? {});
-      const fresh = withShared(ownersOf(m, places, this.git, project), shared("forge.requestAgents")?.[m.url], places);
-      let ps = [], ks = [];
-      try { ps = panes(); ks = terminals(); } catch {}
-      const plan = cleanupPlan(m, fresh, places, ps, ks, this.git, leftoversOf(m, this.worktrees.list), this.worktrees.machine ?? null);
+      const p = props() ?? {};
+      const project = projectOf(p);
+      const folder = checkoutOf(p.folder, spaces(), project.on, project.repo);
+      const plan = await planCleanup(m, owners, { project, folder, look: this.look, worktrees: this.worktrees,
+        listed: shared("forge.requestAgents")?.[m.url] }, H);
       this.done(m.iid);
       if (plan.blocked) this.notice = { iid: m.iid, text: `Not yet: ${plan.blocked}.`, error: true };
-      else if (!plan.tabs.length && !plan.kills.length && !plan.worktrees.length) this.notice = { iid: m.iid, text: "Nothing left to clean up.", error: false };
+      else if (emptyPlan(plan)) this.notice = { iid: m.iid, text: "Nothing left to clean up.", error: false };
       else this.confirming = { iid: m.iid, id: "cleanup", plan };
       cx.notify();
     });
@@ -240,26 +164,8 @@ export default class ForgeRequests extends View {
     this.notice = null;
     cx.notify();
     cx.spawn(async (cx) => {
-      const said = [], failed = [];
-      try {
-        // confirmed: our own confirm already listed the tab.
-        for (const t of plan.tabs) { run("tab.close", { id: t.id, confirmed: true }); said.push(`closed ${t.name}`); }
-        for (const k of plan.kills) { run("terminal.kill", { terminal: k.address }); said.push(`ended ${k.name}`); }
-        if (plan.worktrees.length && (plan.tabs.length || plan.kills.length)) await cx.sleep(1000); // let their shells go
-        for (const w of plan.worktrees) {
-          try {
-            const r = await exec("sh", ["-c", CLEAN_WORKTREE, "sh", w.top, w.branch, m.head_sha ?? ""], { on: w.machine });
-            const text = (r.stdout || r.stderr || "").trim().split("\n").pop();
-            (r.code === 0 ? said : failed).push(text || `exited ${r.code}`);
-          } catch (e) {
-            failed.push(`${w.top}: ${message(e)}`);
-          }
-          for (const [key, g] of this.git) if (g.top === w.top) this.git.delete(key);
-        }
-        if (plan.worktrees.length) this.worktrees.at = 0; // list them again on the next tick
-      } catch (e) {
-        failed.push(message(e));
-      }
+      const { said, failed } = await runCleanup(m, plan, { look: this.look, worktrees: this.worktrees },
+        { exec, run, sleep: (ms) => cx.sleep(ms) });
       const text = [...said, ...failed].join("; ") || "Done";
       this.notice = { iid: m.iid, text: text[0].toUpperCase() + text.slice(1), error: failed.length > 0 };
       this.toast(m, failed.length ? "Clean up incomplete" : "Cleaned up", this.notice);
@@ -327,9 +233,7 @@ export default class ForgeRequests extends View {
         if (Array.isArray(out?.merged)) {
           this.merged = out.merged;
           // Confirmed before (by this window or another): final, no need to check again.
-          for (const m of this.merged) {
-            if (m.deployed && m.merge_sha) this.checks.set(m.merge_sha, { state: "yes", text: m.deployed.text || null, at: m.deployed.at_ms });
-          }
+          seedChecks(this.merged, this.checks);
         }
         this.mergedError = out?.error ?? null;
       } catch (e) {
@@ -500,7 +404,7 @@ export default class ForgeRequests extends View {
   // like the open rows' buttons): the solid button once it's deployed, else a plain one
   // whose confirm says what isn't done (a merge that never reached CI shouldn't strand its agent).
   mergedRow(t, m, p, terms, now, owners, agentList, leftovers) {
-    const st = deployState(m, p.deploy, this.checks, now);
+    const st = deployState(m, p.deploy, this.checks.checks, now);
     const busy = this.busy[m.iid];
     const hov = this.hovered === m.iid && !busy && this.confirming?.iid !== m.iid;
     const canClean = hov && (owners.length > 0 || leftovers.length > 0);
@@ -574,7 +478,7 @@ export default class ForgeRequests extends View {
       const places = this.places();
       const ownersCache = new Map();
       const ownersOfReq = (r) => {
-        if (!ownersCache.has(r.iid)) ownersCache.set(r.iid, ownersOf(r, places, this.git, project));
+        if (!ownersCache.has(r.iid)) ownersCache.set(r.iid, ownersOf(r, places, this.look.git, project));
         return ownersCache.get(r.iid);
       };
       let hovActions = [], hovAsk = null;
