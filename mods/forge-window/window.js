@@ -40,7 +40,24 @@ export function withConfig(project, config) {
 // browser filling the rest (it needs the room: filters, list and detail side by side). Each
 // panel is a layout block, so it collapses, detaches and opens as a pane like any other.
 // Written to layouts/forge.json and shown with layout.switch.
-export function forgeLayout(project, config = {}) {
+// Blocks other packages put in layouts/forge.json (any block whose mod isn't one of Forge's,
+// such as herdr-workstream's zero-height publisher) survive Forge rewriting the file: pass
+// keptBlocks(the current layout) as `kept`, and each goes back into the column it was in
+// (the left one when that column is gone).
+export function keptBlocks(layout) {
+  const own = new Set([...PANELS.map((p) => p.mod), "forge-window"]);
+  const out = [];
+  const walk = (n, parent) => {
+    if (!n || typeof n !== "object") return;
+    const mod = n.content && typeof n.content === "object" ? n.content.mod : null;
+    if (n.type === "block" && mod && !own.has(mod)) out.push({ parent: parent?.id ?? null, block: n });
+    for (const c of Array.isArray(n.children) ? n.children : []) walk(c, n);
+  };
+  walk(layout, null);
+  return out;
+}
+
+export function forgeLayout(project, config = {}, kept = []) {
   const own = config?.projects?.[projectKey(project)] ?? {};
   const base = { provider: project.provider, host: project.host, repo: project.repo, on: project.on ?? null };
   const block = (p, props) => ({
@@ -59,6 +76,13 @@ export function forgeLayout(project, config = {}) {
     column("forge-middle", "middle", 340),
     ...PANELS.filter((p) => !p.side).map((p) => block(p, propsOf(p))),
   ];
+  const columns = new Map(row.filter((n) => n.type === "column").map((n) => [n.id, n]));
+  const ids = new Set(row.flatMap((n) => [n.id, ...(n.children ?? []).map((c) => c.id)]));
+  for (const { parent, block: b } of kept ?? []) {
+    if (!b?.id || ids.has(b.id)) continue;
+    ids.add(b.id);
+    (columns.get(parent) ?? columns.get("forge-left")).children.push(b);
+  }
   return {
     id: "root", type: "column", children: [
       { id: "forge-bar", type: "block", size: { px: 38 }, content: { mod: "forge-window", props: { bar: true } } },

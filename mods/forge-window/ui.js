@@ -107,6 +107,11 @@ export class Chrome {
     cx.notify();
   }
 
+  close() {
+    const p = props() ?? {};
+    if (p.overlay != null) closeOverlay(p.overlay);
+  }
+
   dock() {
     const p = props() ?? {};
     if (p.dockTo) run("layout.show", { id: p.dockTo });
@@ -149,7 +154,9 @@ export class Chrome {
       .when(this.hovered && where === "block" && Boolean(this.block()), (e) => e
         .child(icon("pane", "⧉", "Open as a pane", () => this.openAsPane()))
         .child(icon("detach", "↗", "Detach into a window", (cx) => this.detach(cx))))
-      .when(where === "window", (e) => e.child(icon("dock", "↙", "Dock it back", () => this.dock())));
+      .when(where === "window", (e) => e.child(icon("dock", "↙", "Dock it back", () => this.dock())))
+      // Opened as an overlay by another mod (no block to dock back to): only a close.
+      .when(where === "inside", (e) => e.child(icon("close", "✕", "Close", () => this.close())));
   }
 }
 
