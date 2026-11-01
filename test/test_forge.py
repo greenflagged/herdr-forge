@@ -348,6 +348,246 @@ class Forge(unittest.TestCase):
         normal = self.run_forge("commits", repo, "origin/main", "30d", int(time.time() * 1000), 0, 0)
         self.assertGreater(normal["fetched"], 0, "the normal call fetches when it's due")
 
+    # -- milestone issues and issue notes --
+
+    def wi_route(self, nodes, more=False, cursor=None, count=None, **extra):
+        page = {"count": len(nodes) if count is None else count,
+                "pageInfo": {"hasNextPage": more, "endCursor": cursor}, "nodes": nodes}
+        return [r"workItems\(", {"out": {"data": {"project": {"workItems": page}}, **extra}}]
+
+    @staticmethod
+    def wi(iid, *mrs):
+        # Every widget that isn't the development one comes back empty.
+        return {"iid": str(iid), "widgets": [{}, {}, {"closingMergeRequests": {"nodes": [{"mergeRequest": m} for m in mrs]}}, {}]}
+
+    @staticmethod
+    def wmr(iid, project="acme/shop", **kw):
+        return {"iid": str(iid), "title": f"MR {iid}\n\x1b x", "state": "opened", "draft": False, "sourceBranch": f"b{iid}",
+                "diffHeadSha": f"old{iid}", "webUrl": f"https://gitlab.com/{project}/-/merge_requests/{iid}",
+                "mergedAt": None, **kw}
+
+    def prime(self, requests=(), merged=()):
+        """Caches `requests` and `merged` as a panel's poll would; their answers' `at`."""
+        self.routes([[r"merge_requests\?state=opened", {"out": list(requests)}], [r"merge_requests\?state=merged", {"out": list(merged)}],
+                     [r"pipelines", {"out": []}]])
+        return self.run_forge("requests", *P, 60, 1)["at"], self.run_forge("merged", *P, 60, 1)["at"]
+
+    def test_milestone_issues_carry_closing_and_branch_links(self):
+        now = time.time() * 1000
+        rest = [r"issues\?milestone=", {"out": [issue(5, ["bug\x1b"], user_notes_count=3),
+                                                issue(7, state="closed", closed_at=iso(NOW))]}]
+        links = self.wi_route([self.wi(5, self.wmr(9), self.wmr(4, project="other/shop")), self.wi(7)], count=2)
+        self.routes([rest, links])
+        first = self.run_forge("milestone-issues", *P, "v 1", 600, 0)
+        self.assertIsNone(first["error"])
+        self.assertTrue(any("issues?milestone=v%201&state=all&order_by=updated_at&sort=desc" in c for c in self.calls()))
+        # Polled after the milestone answer, so these rows are the fresher ones.
+        req_at, mrg_at = self.prime([mr(7, source_branch="7-fix-login"), mr(8, source_branch="v2-70"), mr(9, sha="new9")],
+                                    [mr(11, source_branch="issue-5", merged_at=iso(now - 3600000), merge_commit_sha="m11")])
+        self.routes([rest, links])
+        out = self.run_forge("milestone-issues", *P, "v 1", 600, 0)
+        self.assertEqual(out["at"], first["at"], "the milestone answer itself came from the cache")
+        self.assertEqual(out["links"], {"closes": True, "closes_reason": None, "requests": req_at, "merged": mrg_at})
+        self.assertEqual((out["total"], out["partial"]), (2, False))
+        five, seven = out["issues"]
+        self.assertEqual((five["iid"], seven["iid"]), (5, 7), "open ones first")
+        self.assertEqual([(r["iid"], r["via"]) for r in five["requests"]], [(9, "closes"), (11, "branch")],
+                         "another project's MR dropped, no branch duplicate of a closing link")
+        nine = five["requests"][0]
+        self.assertEqual(nine["sha"], "new9", "the fresher requests row wins")
+        self.assertEqual(nine["title"], "MR 9 x")
+        self.assertEqual(set(nine), {"iid", "title", "state", "draft", "source", "url", "sha", "merged_ms", "via"})
+        self.assertEqual(five["requests"][1]["state"], "merged")
+        self.assertEqual([(r["iid"], r["via"]) for r in seven["requests"]], [(7, "branch")], "v2-70 isn't #7")
+        self.assertEqual((five["labels"], five["notes"], five["triage"]), (["bug"], 3, None))
+        self.assertEqual(seven["closed_ms"], NOW // 1000 * 1000)
+        self.assertIsNotNone(five["updated_ms"])
+        self.run_forge("lock", *P, 5, 1)
+        self.assertTrue(self.run_forge("milestone-issues", *P, "v 1", 600, 0)["issues"][0]["triage"]["locked"])
+
+    def test_milestone_issues_prefer_the_newer_copy(self):
+        now = time.time() * 1000
+        self.prime([mr(9), mr(12, source_branch="5-also")])
+        merged_9 = self.wmr(9, state="merged", mergedAt=iso(now - 60000))
+        self.routes([[r"issues\?milestone=", {"out": [issue(5)]}], self.wi_route([self.wi(5, merged_9)])])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1)
+        nine = out["issues"][0]["requests"][0]
+        self.assertEqual((nine["state"], nine["sha"]), ("merged", "old9"), "an older requests row doesn't undo a merge")
+        self.assertIn((12, "branch"), [(r["iid"], r["via"]) for r in out["issues"][0]["requests"]])
+        self.prime([mr(9)], [mr(9, merged_at=iso(now - 30000), merge_commit_sha="m9")])
+        self.routes([])
+        nine = self.run_forge("milestone-issues", *P, "v1", 600, 0)["issues"][0]["requests"][0]
+        self.assertEqual((nine["state"], nine["sha"], nine["merged_ms"]), ("merged", "sha9", int(now - 30000) // 1000 * 1000),
+                         "a merged row wins over the requests row that still lists it")
+        db = self.db()
+        db.execute("UPDATE cache SET at=? WHERE k LIKE 'requests@%' OR k LIKE 'merged@%'", (time.time() - 3601,))
+        db.commit()
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertEqual((out["links"]["requests"], out["links"]["merged"]), (None, None), "an hour-old row isn't used")
+        self.assertEqual([r["iid"] for r in out["issues"][0]["requests"]], [9])
+
+    def test_milestone_issues_without_cached_requests_say_so(self):
+        self.routes([[r"issues\?milestone=", {"out": [issue(5)]}], self.wi_route([self.wi(5, self.wmr(9))])])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertEqual((out["links"]["requests"], out["links"]["merged"]), (None, None))
+        self.assertEqual([r["iid"] for r in out["issues"][0]["requests"]], [9])
+
+    def test_milestone_issues_without_the_development_widget(self):
+        self.routes([[r"issues\?milestone=", {"out": [issue(5), issue(6)]}],
+                     [r"workItems\(", {"err": "Field 'workItems' doesn't exist on type 'Project'"}]])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertIsNone(out["error"])
+        self.assertFalse(out["links"]["closes"])
+        self.assertIn("doesn't exist on type", out["links"]["closes_reason"])
+        self.assertEqual((len(out["issues"]), out["total"]), (2, 2))
+        n = sum("workItems" in c for c in self.calls())
+        self.run_forge("milestone-issues", *P, "v1", 600, 1)
+        self.assertEqual(sum("workItems" in c for c in self.calls()), n, "remembered: not asked again")
+        memo = json.loads(self.db().execute("SELECT v FROM meta WHERE k='cap:closing_links'").fetchone()[0])
+        self.assertEqual(set(memo), {"at", "msg"})
+
+    def test_milestone_issues_keep_a_transient_failure_out_of_the_memo(self):
+        self.routes([[r"issues\?milestone=", {"out": [issue(5)]}], [r"workItems\(", {"err": "Timeout on workItems"}]])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertEqual((out["error"], out["issues"]), ("Timeout on workItems", []))
+        self.assertIsNone(self.db().execute("SELECT v FROM meta WHERE k='cap:closing_links'").fetchone())
+
+    def test_milestone_issues_fail_on_a_half_answered_page(self):
+        self.routes([[r"issues\?milestone=", {"out": [issue(5)]}],
+                     [r"workItems\(", {"out": {"data": {"project": {"workItems": None}}, "errors": [{"message": "Timeout"}]}}]])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertEqual((out["error"], out["issues"]), ("Timeout", []), "not a silent requests: []")
+
+    def test_milestone_issues_skip_a_closing_mr_they_cant_see(self):
+        hidden = {"message": "no access", "path": ["project", "workItems", "nodes", 0, "widgets", 2,
+                                                   "closingMergeRequests", "nodes", 1, "mergeRequest"]}
+        self.routes([[r"issues\?milestone=", {"out": [issue(5)]}],
+                     self.wi_route([self.wi(5, self.wmr(9), None)], errors=[hidden])])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertIsNone(out["error"])
+        self.assertEqual([r["iid"] for r in out["issues"][0]["requests"]], [9])
+
+    def test_milestone_issues_is_partial_when_the_budget_runs_out(self):
+        self.routes([[r"issues\?milestone=", {"out": [issue(5)]}], self.wi_route([self.wi(5)])])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0, HERDR_FORGE_BUDGET="0")
+        self.assertFalse(out["partial"], "a finished walk isn't partial, out of time or not")
+        self.routes([[r"issues\?milestone=.*page=1$", {"out": [issue(k) for k in range(1, 101)]}],
+                     [r"issues\?milestone=.*page=2$", {"out": [issue(101)]}],
+                     self.wi_route([self.wi(1)], more=True, cursor="c1", count=101)])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((out["partial"], len(out["issues"]), out["total"]), (True, 100, 101))
+        self.assertFalse(any("page=2" in c for c in self.calls()))
+        # The page cap: five pages of each, then stop. Offset pages may repeat a row.
+        pages = [[issue(k * 100 + j) for j in range(100)] for k in range(1, 6)]
+        pages[1][0] = pages[0][-1]
+        self.routes([[rf"issues\?milestone=.*page={k + 1}$", {"out": pages[k]}] for k in range(5)]
+                    + [self.wi_route([], more=True, cursor="c", count=900)])
+        before = self.calls()
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1)
+        new = self.calls()[len(before):]
+        self.assertEqual((sum("issues?milestone" in c for c in new), sum("workItems" in c for c in new)), (5, 5))
+        self.assertEqual((out["partial"], len(out["issues"]), out["total"]), (True, 499, 900))
+
+    def test_milestone_issues_keep_a_complete_answer_over_a_shorter_partial_one(self):
+        routes = [[r"issues\?milestone=.*page=1$", {"out": [issue(k) for k in range(1, 101)]}],
+                  [r"issues\?milestone=.*page=2$", {"out": [issue(101)]}],
+                  [r"workItems\(.* -f after=c1", self.wi_route([self.wi(101)], count=101)[1]],
+                  self.wi_route([self.wi(1)], more=True, cursor="c1", count=101)]
+        self.routes(routes)
+        full = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertEqual((full["partial"], len(full["issues"])), (False, 101))
+        self.routes(routes)
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((out["partial"], len(out["issues"]), out["at"], out["error"]), (False, 101, full["at"], None),
+                         "seen live: a forced refetch out of time replaced 388 issues with 100")
+        db = self.db()
+        db.execute("UPDATE cache SET at = at - 3601")
+        db.commit()
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((out["partial"], len(out["issues"])), (True, 100), "over an hour old: the partial one wins")
+
+    def test_milestone_issues_kept_answer_still_waits_out_max_age(self):
+        routes = [[r"issues\?milestone=.*page=1$", {"out": [issue(k) for k in range(1, 101)]}],
+                  [r"issues\?milestone=.*page=2$", {"out": [issue(101)]}],
+                  [r"workItems\(.* -f after=c1", self.wi_route([self.wi(101)], count=101)[1]],
+                  self.wi_route([self.wi(1)], more=True, cursor="c1", count=101)]
+        self.routes(routes)
+        full = self.run_forge("milestone-issues", *P, "v1", 30, 0)
+        db = self.db()
+        db.execute("UPDATE cache SET at = at - 60 WHERE k LIKE 'milestone-issues%'")
+        db.commit()
+        fetched_at = full["at"] - 60
+        walks = []
+        for _ in range(5):
+            n = len(self.calls())
+            out = self.run_forge("milestone-issues", *P, "v1", 30, 0, HERDR_FORGE_BUDGET="0")
+            walks.append(len(self.calls()) - n)
+            self.assertEqual((out["partial"], len(out["issues"])), (False, 101))
+            self.assertAlmostEqual(out["at"], fetched_at, 3, msg="`at` is when the kept data was fetched")
+        self.assertEqual(walks, [2, 0, 0, 0, 0], "one walk, kept, then maxAge gates the next one")
+        # maxAge after the keep: one more walk, kept again.
+        db.execute("UPDATE meta SET v = json_set(v, '$.tried', json_extract(v, '$.tried') - 31) WHERE k LIKE 'kept:%'")
+        db.commit()
+        n = len(self.calls())
+        self.run_forge("milestone-issues", *P, "v1", 30, 0, HERDR_FORGE_BUDGET="0")
+        self.assertEqual(len(self.calls()) - n, 2)
+        # Past `until`, the keep no longer gates maxAge, though it was tried just now:
+        # the next poll walks again, and (an hour not yet up) keeps again.
+        db.execute("UPDATE meta SET v = json_set(v, '$.until', json_extract(v, '$.tried') - 1) WHERE k LIKE 'kept:%'")
+        db.commit()
+        n = len(self.calls())
+        out = self.run_forge("milestone-issues", *P, "v1", 30, 0, HERDR_FORGE_BUDGET="0")
+        self.assertEqual(len(self.calls()) - n, 2, "`until` passed: maxAge counts from `at` again")
+        self.assertEqual((out["partial"], len(out["issues"])), (False, 101))
+        # An hour on (every timestamp moved back together), the next walk's partial answer replaces it.
+        db.execute("UPDATE cache SET at = at - 3600 WHERE k LIKE 'milestone-issues%'")
+        db.execute("UPDATE meta SET v = json_set(v, '$.of', json_extract(v, '$.of') - 3600, '$.tried', json_extract(v, '$.tried') - 3600,"
+                   " '$.until', json_extract(v, '$.until') - 3600) WHERE k LIKE 'kept:%'")
+        db.commit()
+        out = self.run_forge("milestone-issues", *P, "v1", 30, 0, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((out["partial"], len(out["issues"])), (True, 100))
+        self.assertIsNone(db.execute("SELECT v FROM meta WHERE k LIKE 'kept:%'").fetchone(), "a new answer clears the mark")
+
+    def test_milestone_issues_unknown_title_is_an_empty_milestone(self):
+        self.routes([[r"issues\?milestone=", {"out": []}], self.wi_route([], count=0)])
+        out = self.run_forge("milestone-issues", *P, "no such", 600, 0)
+        self.assertEqual((out["issues"], out["total"], out["partial"], out["error"]), ([], 0, False, None))
+
+    def test_issue_notes_are_newest_first_bounded_and_cleaned(self):
+        self.sync_issues([issue(1)])
+        note = lambda i, body="b", system=False: {"id": i, "author": {"username": "x\x1by"}, "body": body,
+                                                    "created_at": iso(NOW - (10 - i) * 60000), "system": system}
+        self.routes([[r"notes\?sort=desc", {"out": [note(4), note(9, system=True), note(3, "a\x1b[31m\nb"), note(2)]}]])
+        out = self.run_forge("issue-notes", *P, 1, 60, 0, 2)
+        self.assertEqual([(n["id"], n["author"]) for n in out["notes"]], [(4, "x y"), (3, "x y")])
+        self.assertEqual(out["notes"][1]["body"], "a[31m\nb")
+        self.assertFalse(out["partial"])
+        n = len(self.calls())
+        self.run_forge("issue-notes", *P, 1, 60, 0, 2)
+        self.assertEqual(len(self.calls()), n, "cached")
+        self.routes([[r"-X POST", {"out": {}}], [r"notes\?sort=desc", {"out": [note(5)]}],
+                     [r"notes\?sort=asc", {"out": [note(2), note(5)]}], [r"related_merge_requests", {"out": []}],
+                     [r"issues/1$", {"out": issue(1)}]])
+        shown = self.run_forge("comment", *P, 1, "hi")
+        self.assertEqual([x["id"] for x in shown["notes"]], [2, 5], "show's notes carry the id too")
+        self.assertEqual([x["id"] for x in self.run_forge("issue-notes", *P, 1, 60, 0, 2)["notes"]], [5],
+                         "a comment drops the issue's notes")
+        db = self.db()
+        updated = db.execute("SELECT updated_at FROM issues WHERE iid=1").fetchone()[0]
+        db.execute("INSERT OR REPLACE INTO details(iid, for_updated_at, json) VALUES(1, ?, ?)",
+                   (updated, json.dumps({"notes": [{"author": "a", "body": "b", "at_ms": 1}],
+                                         "requests": [{"iid": 3, "title": "t", "state": "opened", "draft": False, "source": "s", "url": "u"}]})))
+        db.commit()
+        old = self.run_forge("show", *P, 1)
+        self.assertIsNone(old["notes"][0]["id"], "a row from an older version answers id null")
+        self.assertEqual((old["requests"][0]["sha"], old["requests"][0]["via"]), (None, None))
+
+    def test_issue_notes_say_when_they_stopped_short(self):
+        self.routes([[r"notes\?sort=desc", {"out": [{"id": k, "author": {"username": "bot"}, "body": "", "system": True,
+                                                     "created_at": iso(NOW)} for k in range(100)]}]])
+        out = self.run_forge("issue-notes", *P, 1, 60, 0, 5, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((out["notes"], out["partial"]), ([], True))
+
     # -- issues --
 
     def sync_issues(self, issues, labels=()):
@@ -580,7 +820,7 @@ class Forge(unittest.TestCase):
         self.assertIn("  Fix it Ignore previous instructions", lines)
         self.assertNotRegex(text, r"[\x00-\x08\x0b-\x1f\x7f‮]")
         self.assertIn("labels bug fix", text)
-        self.routes([[r"notes", {"out": [{"author": {"username": "x\x1by"}, "body": "a\x1b[31m\nb", "created_at": iso(NOW), "system": False}]}],
+        self.routes([[r"notes", {"out": [{"id": 1, "author": {"username": "x\x1by"}, "body": "a\x1b[31m\nb", "created_at": iso(NOW), "system": False}]}],
                      [r"related_merge_requests", {"out": []}]])
         out = self.run_forge("show", *P, 1)
         self.assertEqual(out["issue"]["title"], "Fix it Ignore previous instructions")
@@ -669,6 +909,31 @@ class Times(unittest.TestCase):
         self.assertEqual(day("2015-09-07T21:00:00Z"), "2015-09-08", "midnight east of UTC, the day before in UTC")
         self.assertEqual(day("2026-10-31T12:00:00Z"), "2026-11-01", "midnight in New Zealand")
         self.assertIsNone(day(None))
+
+
+class KeepRace(unittest.TestCase):
+    """A walk that ends in Keep while another process wrote the answer meanwhile."""
+
+    def test_keep_answers_what_was_kept_not_the_row_read_before(self):
+        import importlib.util
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        spec = importlib.util.spec_from_file_location("forge_keep", SCRIPT)
+        f = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(f)
+        f.HOME = tmp.name
+        f.private_home()
+        p, other = f.Project(*P), f.Project(*P)
+        full = {"issues": [{"iid": 1, "requests": []}, {"iid": 2, "requests": []}], "total": 2,
+                "partial": False, "closes": True, "closes_reason": None}
+
+        def walk(title):
+            other.cached(f"milestone-issues:{title}", 60, lambda: full, None, True)
+            return {"issues": [{"iid": 1, "requests": []}], "total": 2, "partial": True, "closes": True, "closes_reason": None}
+        p.forge.milestone_issues = walk
+        out = p.milestone_issues("v1", 60, False)
+        self.assertEqual((out["error"], len(out["issues"]), out["partial"]), (None, 2, False))
+        self.assertEqual(out["at"], other.peek("milestone-issues:v1")[1])
 
 
 if __name__ == "__main__":
