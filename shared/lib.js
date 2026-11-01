@@ -398,14 +398,17 @@ export function issueItem(i, project, sep = "::") {
 // The folder with a request's branch checked out, on `on`: its worktree if it has one,
 // else a new one next to Herdr's (~/.herdr/worktrees/<checkout>/<branch>). Runs in the
 // checkout (the main one or any linked worktree) with the branch as $1; prints the folder.
-// <checkout> is the main checkout's folder name (the parent of the common .git), so one
-// started from inside a worktree doesn't land under that worktree's name.
+// <checkout> is the main checkout's folder name: the first entry of `git worktree list`,
+// as CLEAN_WORKTREE finds it, so a run from a linked worktree or a subfolder still uses it.
+// A bare repo's entry is the repo itself: shop.git and shop/.bare (or shop/.git) give shop.
 export const WORKTREE = `b="$1"
 wt=$(git worktree list --porcelain | awk -v ref="refs/heads/$b" '/^worktree /{w=substr($0,10)} $0=="branch "ref{print w; exit}')
 if [ -z "$wt" ]; then
   git fetch -q origin "$b" || exit 1
-  common=$(cd "$(git rev-parse --git-common-dir)" && pwd) || exit 1
-  wt="$HOME/.herdr/worktrees/$(basename "$(dirname "$common")")/$(printf %s "$b" | tr / -)"
+  main=$(git worktree list --porcelain | sed -n '1s/^worktree //p')
+  main=\${main%/}; main=\${main%/.bare}; main=\${main%.git}; main=\${main%/}
+  [ -n "$main" ] || exit 1
+  wt="$HOME/.herdr/worktrees/$(basename "$main")/$(printf %s "$b" | tr / -)"
   git worktree add -q "$wt" "$b" >&2 || exit 1
 fi
 printf %s "$wt"`;

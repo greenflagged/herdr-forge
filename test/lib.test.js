@@ -4,7 +4,7 @@ import {
   actionList, checkoutOf, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, packScript, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf, WORKTREE,
 } from "../shared/lib.js";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hasGit } from "./fixtures.js";
@@ -143,20 +143,42 @@ test("WORKTREE names the new worktree after the main checkout, wherever it runs"
     GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
   const git = (cwd, ...a) => execFileSync("git", a, { cwd, env, encoding: "utf8" }).trim();
   const run = (cwd, b) => spawnSync("sh", ["-c", WORKTREE, "sh", b], { cwd, env, encoding: "utf8" });
+  const made = (cwd, b, want, why) => {
+    const r = run(cwd, b);
+    assert.equal(r.status, 0, `${why}: ${r.stderr}`);
+    assert.equal(r.stdout, join(dir, ".herdr/worktrees", want), why);
+    return r.stdout;
+  };
   try {
     const origin = join(dir, "origin"), shop = join(dir, "shop");
     git(dir, "init", "-q", "-b", "main", origin);
-    git(origin, "commit", "-q", "--allow-empty", "-m", "one");
-    for (const b of ["feat/a", "feat/b"]) git(origin, "branch", b);
+    mkdirSync(join(origin, "src"));
+    writeFileSync(join(origin, "src/x"), "x\n");
+    git(origin, "add", "src");
+    git(origin, "commit", "-q", "-m", "one");
+    for (const b of ["feat/a", "feat/b", "feat/c", "feat/s", "feat/d", "feat/e"]) git(origin, "branch", b);
     git(dir, "clone", "-q", origin, shop);
-    let r = run(shop, "feat/a");
-    assert.equal(r.status, 0, r.stderr);
-    const a = join(dir, ".herdr/worktrees/shop/feat-a");
-    assert.equal(r.stdout, a, "from the main checkout: under its folder name");
-    r = run(a, "feat/b");
-    assert.equal(r.status, 0, r.stderr);
-    assert.equal(r.stdout, join(dir, ".herdr/worktrees/shop/feat-b"), "from inside a worktree: still the main checkout's name");
+
+    // A plain clone: shop.
+    const a = made(shop, "feat/a", "shop/feat-a", "from the main checkout: under its folder name");
+    made(a, "feat/b", "shop/feat-b", "from inside a linked worktree: still the main checkout's name");
     assert.equal(run(a, "feat/a").stdout, a, "an existing worktree is found, not made again");
+    made(join(shop, "src"), "feat/c", "shop/feat-c", "from a subfolder of the main checkout: the checkout's name");
+
+    // A submodule (super/libs/shop): its own folder name, not modules or super.
+    const sup = join(dir, "super");
+    git(dir, "init", "-q", "-b", "main", sup);
+    git(sup, "-c", "protocol.file.allow=always", "submodule", "add", "-q", origin, "libs/shop");
+    made(join(sup, "libs/shop"), "feat/s", "shop/feat-s", "from a submodule: the submodule's folder name");
+
+    // Bare repos: shop.git gives shop, and so does proj/.bare.
+    const bare = join(dir, "bare/shop.git");
+    git(dir, "clone", "-q", "--bare", origin, bare);
+    const d = made(bare, "feat/d", "shop/feat-d", "from a bare shop.git: shop");
+    made(d, "feat/e", "shop/feat-e", "from a bare repo's worktree: shop");
+    const dotBare = join(dir, "proj/.bare");
+    git(dir, "clone", "-q", "--bare", origin, dotBare);
+    made(dotBare, "feat/d", "proj/feat-d", "from proj/.bare: proj");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -282,20 +304,51 @@ test("sync copies agents.js and cleanup.js only into the mods that import them",
   assert.ok(out.has("mods/forge-ci/lib.js"), "lib.js still goes everywhere");
 });
 
-test("a stray agents.js in a mod that doesn't import it: --check names it, sync deletes it", async () => {
-  const { cpSync, existsSync, writeFileSync } = await import("node:fs");
+test("a stray agents.js in a mod that doesn't import it: sync deletes an exact copy, leaves an edited one", async () => {
+  const { cpSync, existsSync, readFileSync, writeFileSync } = await import("node:fs");
   const { stale, sync } = await import("../scripts/sync.mjs");
   const base = mkdtempSync(join(tmpdir(), "forge-sync-"));
   try {
     const here = new URL("..", import.meta.url).pathname;
     for (const d of ["shared", "mods", "package.json"]) cpSync(join(here, d), join(base, d), { recursive: true });
     assert.deepEqual(stale(base), []);
-    writeFileSync(join(base, "mods/forge-ci/agents.js"), "// stray\n");
+    const stray = join(base, "mods/forge-ci/agents.js");
+    writeFileSync(stray, readFileSync(join(base, "shared/agents.js")));
     assert.deepEqual(stale(base), ["mods/forge-ci/agents.js (not imported there: sync deletes it)"]);
     sync(base);
-    assert.ok(!existsSync(join(base, "mods/forge-ci/agents.js")));
+    assert.ok(!existsSync(stray));
     assert.ok(existsSync(join(base, "mods/forge-requests/agents.js")), "an imported copy stays");
     assert.deepEqual(stale(base), []);
+
+    writeFileSync(stray, "// someone's edit\n");
+    const edited = ["mods/forge-ci/agents.js (not imported there: it differs from shared/, so sync leaves it; delete it by hand)"];
+    assert.deepEqual(stale(base), edited);
+    sync(base);
+    assert.equal(readFileSync(stray, "utf8"), "// someone's edit\n", "an edited stray is left alone");
+    assert.deepEqual(stale(base), edited, "and --check keeps naming it");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("sync counts dynamic and side-effect imports of a shared module", async () => {
+  const { cpSync, existsSync, readFileSync, writeFileSync } = await import("node:fs");
+  const { expected, stale, sync } = await import("../scripts/sync.mjs");
+  const base = mkdtempSync(join(tmpdir(), "forge-sync-"));
+  try {
+    const here = new URL("..", import.meta.url).pathname;
+    for (const d of ["shared", "mods", "package.json"]) cpSync(join(here, d), join(base, d), { recursive: true });
+    const main = join(base, "mods/forge-ci/main.js");
+    const text = readFileSync(main, "utf8");
+    for (const [line, f] of [['const { claimLooks } = await import("./agents.js");', "agents.js"], ['import "./cleanup.js";', "cleanup.js"]]) {
+      writeFileSync(main, `${text}\n${line}\n`);
+      assert.ok(expected(base).has(`mods/forge-ci/${f}`), line);
+      sync(base);
+      assert.ok(existsSync(join(base, "mods/forge-ci", f)), `${line}: copied, not deleted`);
+      assert.deepEqual(stale(base), []);
+    }
+    writeFileSync(main, `${text}\n// import("./agents.js");\n`);
+    assert.ok(!expected(base).has("mods/forge-ci/agents.js"), "a // line doesn't count");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

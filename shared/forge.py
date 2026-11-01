@@ -361,7 +361,10 @@ class Cli:
 
     def whoami(self):
         """The account the CLI is logged in as on this host: the name Note.author gives its comments."""
-        user = (self.api("user") or {}).get(self.login)
+        data = self.api("user")
+        if not isinstance(data, dict):
+            raise RuntimeError(f"{self.cli} api user didn't answer with an account on {self.p.host}")
+        user = data.get(self.login)
         if not isinstance(user, str) or not user:
             raise RuntimeError(f"{self.cli} didn't say who is logged in on {self.p.host}")
         return user

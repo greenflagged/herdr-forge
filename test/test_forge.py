@@ -607,6 +607,11 @@ class Forge(unittest.TestCase):
         out = self.run_forge("whoami", *P, 60, 0, HOME=fresh)
         self.assertIsNone(out["user"])
         self.assertIn("who is logged in", out["error"])
+        for odd in ([{"username": "di"}], '"di"'):  # an array, a JSON string
+            self.routes([[r"user$", {"out": odd}]])
+            out = self.run_forge("whoami", *P, 60, 1, HOME=fresh)
+            self.assertIsNone(out["user"], odd)
+            self.assertIn("didn't answer with an account", out["error"])
 
     # -- issues --
 

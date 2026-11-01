@@ -3,7 +3,8 @@
 // a hash of its contents (mods install each version once per machine). The optional shared
 // modules (agents.js, cleanup.js) go only to the mods that import them. `--check` only reports
 // copies that differ, and optional ones a mod doesn't import, for the tests and CI; a plain
-// run writes the copies and deletes those strays. `base` (tests only) is another tree like this one.
+// run writes the copies and deletes those strays, but only one that is still an exact copy
+// of shared/: an edited one is reported and left. `base` (tests only) is another tree like this one.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -13,8 +14,11 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const NO_FORGE = new Set(["forge-toggle"]); // layout glue: never calls forge.py
 const OPTIONAL = ["agents.js", "cleanup.js"]; // copied only where something imports them
 
-// The optional shared modules a text imports (`from "./agents.js"`), not counting `//` comment lines.
-const importsOf = (text) => [...text.replace(/^\s*\/\/.*$/gm, "").matchAll(/\bfrom\s+["']\.\/([\w.-]+\.js)["']/g)].map((m) => m[1]).filter((f) => OPTIONAL.includes(f));
+// The optional shared modules a text imports: `from "./agents.js"`, `import("./agents.js")`
+// and `import "./agents.js"`. Lines that start with `//` don't count; a `/* */` block still does.
+const importsOf = (text) => [...text.replace(/^\s*\/\/.*$/gm, "")
+  .matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)["']\.\/([\w.-]+\.js)["']/g)]
+  .map((m) => m[1]).filter((f) => OPTIONAL.includes(f));
 
 // The optional modules a mod needs: the ones its own files import (not copies of shared
 // files, so a stray copy can't make itself needed), and what those import in turn.
@@ -56,11 +60,13 @@ export function expected(base = root) {
   return out;
 }
 
-// Copies of an optional module in a mod that doesn't import it.
+// Copies of an optional module in a mod that doesn't import it, and whether each is still
+// exactly shared/'s text (only those are safe to delete: an edited one may be someone's work).
 function strays(want, base) {
   return readdirSync(join(base, "mods")).filter((m) => m.startsWith("forge-")).sort()
-    .flatMap((mod) => OPTIONAL.map((f) => join("mods", mod, f)))
-    .filter((path) => !want.has(path) && existsSync(join(base, path)));
+    .flatMap((mod) => OPTIONAL.map((f) => ({ path: join("mods", mod, f), f })))
+    .filter(({ path }) => !want.has(path) && existsSync(join(base, path)))
+    .map(({ path, f }) => ({ path, same: readFileSync(join(base, path), "utf8") === readFileSync(join(base, "shared", f), "utf8") }));
 }
 
 export function stale(base = root) {
@@ -69,13 +75,14 @@ export function stale(base = root) {
     const file = join(base, path);
     return !existsSync(file) || readFileSync(file, "utf8") !== text;
   }).map(([path]) => path);
-  return [...bad, ...strays(want, base).map((path) => `${path} (not imported there: sync deletes it)`)];
+  return [...bad, ...strays(want, base).map(({ path, same }) =>
+    `${path} (not imported there: ${same ? "sync deletes it" : "it differs from shared/, so sync leaves it; delete it by hand"})`)];
 }
 
 export function sync(base = root) {
   const want = expected(base);
   for (const [path, text] of want) writeFileSync(join(base, path), text);
-  for (const path of strays(want, base)) rmSync(join(base, path));
+  for (const { path, same } of strays(want, base)) if (same) rmSync(join(base, path));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
