@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+c05c927ceb86"
+VERSION = "0.1.0+867114d8d39e"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -51,7 +51,8 @@ RUNNER_DETAILS_EVERY = 600
 CACHE_DAYS = 7                  # cached answers nobody asked for in a week are deleted
 MERGED_DAYS = 7                 # how far back `merged` looks
 MILESTONE_PAGES = 5             # pages of 100 issues `milestone-issues` walks, most recently updated first
-PEEK_MAX_AGE = 3600             # seconds a cached `requests` / `merged` answer may be joined into another
+PEEK_MAX_AGE = 3600             # seconds a cached `requests` / `merged` answer may be joined into another,
+                                # and a complete `milestone-issues` answer kept over a partial one
 PRIORITIES = ["blocker", "critical", "high", "medium", "low"]
 START = time.time()
 
@@ -61,7 +62,12 @@ class Busy(RuntimeError):
 
 
 class Keep(Exception):
-    """Raised by a `cached` fetch: keep the cached answer, as it is, over what came back."""
+    """Raised by a `cached` fetch: keep this cached answer `(data, at)` over what came back,
+    and count the attempt as a fetch for `max_age` until `until` (epoch seconds)."""
+
+    def __init__(self, data, at, until):
+        super().__init__()
+        self.data, self.at, self.until = data, at, until
 
 
 class NoCli(RuntimeError):
@@ -1384,11 +1390,17 @@ class Project:
         """(data, fetched_at, error).
         max_age < 0 takes any cached answer (a mod's first read, so it draws at once).
         While another process fetches the same answer, this one gets the last answer.
-        A failed fetch keeps the last answer and says why; with none, `default`."""
+        A failed fetch keeps the last answer and says why; with none, `default`.
+        A fetch that raises Keep keeps the answer it names; until `Keep.until`, that attempt
+        counts as a fetch for `max_age`, while `at` still says when the data was fetched."""
         now = time.time()
         k = self.key(k)
-        row =self.db.execute("SELECT at, json, lease FROM cache WHERE k=? AND shape=?", (k, SHAPES)).fetchone()
-        if row and not force and (max_age < 0 or now - row[0] < max_age):
+        row = self.db.execute("SELECT at, json, lease FROM cache WHERE k=? AND shape=?", (k, SHAPES)).fetchone()
+        tried = row and row[0]
+        kept = self.meta("kept:" + k) if row else None
+        if isinstance(kept, dict) and kept.get("of") == row[0] and now < (kept.get("until") or 0):
+            tried = kept.get("tried") or tried  # kept over a later attempt: maxAge counts from that
+        if row and not force and (max_age < 0 or now - tried < max_age):
             return json.loads(row[1]), row[0], None
         if row:
             got = self.db.execute("UPDATE cache SET lease=? WHERE k=? AND lease<=?", (now + LEASE, k, now)).rowcount
@@ -1397,9 +1409,10 @@ class Project:
                 return json.loads(row[1]), row[0], None
         try:
             data = fetch()
-        except Keep:
+        except Keep as keep:
+            self.set_meta("kept:" + k, {"tried": now, "of": keep.at, "until": keep.until})
             self.write("UPDATE cache SET lease=0 WHERE k=?", (k,))
-            return json.loads(row[1]), row[0], None
+            return keep.data, keep.at, None
         except FETCH_ERRORS as e:
             self.nocli = self.nocli or isinstance(e, NoCli)
             if row:
@@ -1408,8 +1421,10 @@ class Project:
             return default, 0, str(e) or type(e).__name__
         self.db.execute("INSERT OR REPLACE INTO cache(k, at, json, shape, lease) VALUES(?,?,?,?,0)",
                         (k, now, json.dumps(data), SHAPES))
+        self.db.execute("DELETE FROM meta WHERE k=?", ("kept:" + k,))
         if random.random() < 0.05:
             self.db.execute("DELETE FROM cache WHERE at < ?", (now - CACHE_DAYS * 86400,))
+            self.db.execute("DELETE FROM meta WHERE k LIKE 'kept:%' AND substr(k, 6) NOT IN (SELECT k FROM cache)")
         self.db.commit()
         return data, now, None
 
@@ -1586,9 +1601,9 @@ class Project:
             new, old = self.forge.milestone_issues(title), self.peek(f"milestone-issues:{title}")
             # A walk cut short (seen live: 388 issues, then 100) doesn't replace a complete
             # answer under an hour old.
-            if new["partial"] and old and not old[0]["partial"] and time.time() - old[1] < PEEK_MAX_AGE \
-                    and len(new["issues"]) < len(old[0]["issues"]):
-                raise Keep()
+            shorter = new["partial"] and old and not old[0]["partial"] and len(new["issues"]) < len(old[0]["issues"])
+            if shorter and time.time() - old[1] < PEEK_MAX_AGE:
+                raise Keep(old[0], old[1], old[1] + PEEK_MAX_AGE)
             return new
         data, at, err = self.cached(f"milestone-issues:{title}", max_age, fetch,
                                     {"issues": [], "total": None, "partial": False, "closes": False, "closes_reason": None},

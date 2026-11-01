@@ -506,6 +506,43 @@ class Forge(unittest.TestCase):
         out = self.run_forge("milestone-issues", *P, "v1", 600, 1, HERDR_FORGE_BUDGET="0")
         self.assertEqual((out["partial"], len(out["issues"])), (True, 100), "over an hour old: the partial one wins")
 
+    def test_milestone_issues_kept_answer_still_waits_out_max_age(self):
+        routes = [[r"issues\?milestone=.*page=1$", {"out": [issue(k) for k in range(1, 101)]}],
+                  [r"issues\?milestone=.*page=2$", {"out": [issue(101)]}],
+                  [r"workItems\(.* -f after=c1", self.wi_route([self.wi(101)], count=101)[1]],
+                  self.wi_route([self.wi(1)], more=True, cursor="c1", count=101)]
+        self.routes(routes)
+        full = self.run_forge("milestone-issues", *P, "v1", 30, 0)
+        db = self.db()
+        db.execute("UPDATE cache SET at = at - 60 WHERE k LIKE 'milestone-issues%'")
+        db.commit()
+        fetched_at = full["at"] - 60
+        walks = []
+        for _ in range(5):
+            n = len(self.calls())
+            out = self.run_forge("milestone-issues", *P, "v1", 30, 0, HERDR_FORGE_BUDGET="0")
+            walks.append(len(self.calls()) - n)
+            self.assertEqual((out["partial"], len(out["issues"])), (False, 101))
+            self.assertAlmostEqual(out["at"], fetched_at, 3, msg="`at` is when the kept data was fetched")
+        self.assertEqual(walks, [2, 0, 0, 0, 0], "one walk, kept, then maxAge gates the next one")
+        # maxAge after the keep: one more walk, kept again.
+        db.execute("UPDATE meta SET v = json_set(v, '$.tried', json_extract(v, '$.tried') - 31) WHERE k LIKE 'kept:%'")
+        db.commit()
+        n = len(self.calls())
+        self.run_forge("milestone-issues", *P, "v1", 30, 0, HERDR_FORGE_BUDGET="0")
+        self.assertEqual(len(self.calls()) - n, 2)
+        # An hour from the original fetch, the next walk's partial answer replaces it.
+        db.execute("UPDATE cache SET at = at - 3600 WHERE k LIKE 'milestone-issues%'")
+        db.commit()
+        out = self.run_forge("milestone-issues", *P, "v1", 30, 0, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((out["partial"], len(out["issues"])), (True, 100))
+        self.assertIsNone(db.execute("SELECT v FROM meta WHERE k LIKE 'kept:%'").fetchone(), "a new answer clears the mark")
+
+    def test_milestone_issues_unknown_title_is_an_empty_milestone(self):
+        self.routes([[r"issues\?milestone=", {"out": []}], self.wi_route([], count=0)])
+        out = self.run_forge("milestone-issues", *P, "no such", 600, 0)
+        self.assertEqual((out["issues"], out["total"], out["partial"], out["error"]), ([], 0, False, None))
+
     def test_issue_notes_are_newest_first_bounded_and_cleaned(self):
         self.sync_issues([issue(1)])
         note = lambda i, body="b", system=False: {"id": i, "author": {"username": "x\x1by"}, "body": body,
@@ -862,6 +899,31 @@ class Times(unittest.TestCase):
         self.assertEqual(day("2015-09-07T21:00:00Z"), "2015-09-08", "midnight east of UTC, the day before in UTC")
         self.assertEqual(day("2026-10-31T12:00:00Z"), "2026-11-01", "midnight in New Zealand")
         self.assertIsNone(day(None))
+
+
+class KeepRace(unittest.TestCase):
+    """A walk that ends in Keep while another process wrote the answer meanwhile."""
+
+    def test_keep_answers_what_was_kept_not_the_row_read_before(self):
+        import importlib.util
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        spec = importlib.util.spec_from_file_location("forge_keep", SCRIPT)
+        f = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(f)
+        f.HOME = tmp.name
+        f.private_home()
+        p, other = f.Project(*P), f.Project(*P)
+        full = {"issues": [{"iid": 1, "requests": []}, {"iid": 2, "requests": []}], "total": 2,
+                "partial": False, "closes": True, "closes_reason": None}
+
+        def walk(title):
+            other.cached(f"milestone-issues:{title}", 60, lambda: full, None, True)
+            return {"issues": [{"iid": 1, "requests": []}], "total": 2, "partial": True, "closes": True, "closes_reason": None}
+        p.forge.milestone_issues = walk
+        out = p.milestone_issues("v1", 60, False)
+        self.assertEqual((out["error"], len(out["issues"]), out["partial"]), (None, 2, False))
+        self.assertEqual(out["at"], other.peek("milestone-issues:v1")[1])
 
 
 if __name__ == "__main__":

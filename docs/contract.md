@@ -151,7 +151,13 @@ They are still untrusted: anyone who can comment wrote them.
   `requests` may be missing. Force at most once per `maxAge`: if the answer is still
   partial, that is the steady state for this milestone, so poll normally and read `total`.
   A refetch (forced or not) that comes back partial with fewer issues than a complete
-  answer under an hour old keeps that answer: `partial` stays false and `at` doesn't move.
+  answer under an hour old keeps that answer: `partial` stays false and `at` doesn't move
+  (`at` is still when that data was fetched). The kept answer then counts as fresh for
+  `maxAge` from the refetch, so polls don't walk the milestone again before then. A kept
+  answer looks just like one a concurrent fetch left in place: same answer, same `at`.
+  So during that hour, `partial: false` after a forced refetch doesn't mean the walk
+  finished, and a milestone whose walks are always partial shows no partial answer until
+  the complete one is an hour old. After that, the next refetch's answer replaces it.
 - An unknown milestone title (renamed, deleted, or a typo) answers `issues: []`, `total: 0`,
   `error: null`, the same as an empty milestone. Check the title against `milestones` to
   tell them apart.
