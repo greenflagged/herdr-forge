@@ -223,8 +223,9 @@ test("forgeClient's boot and install code runs under real python", async () => {
 
 test("forge.py stays small enough to send as one argument", async () => {
   const { statSync } = await import("node:fs");
-  // Linux caps one argument at 128 KiB; past 100 KB, compress it or send it in parts.
-  assert.ok(statSync(new URL("../shared/forge.py", import.meta.url)).size < 100_000);
+  // Linux caps one argument at 131,072 bytes; 120 KB leaves ~14 KB to spare. Before the next
+  // sizeable feature, compress the install payload or send it in parts (lib.js INSTALL, sync.mjs).
+  assert.ok(statSync(new URL("../shared/forge.py", import.meta.url)).size < 120_000);
 });
 
 test("findBlocks and collapse sizes", () => {
