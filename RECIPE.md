@@ -1,16 +1,18 @@
 # Forge
 
-GitLab panels for Herdr. Press ctrl-shift-f and the whole window becomes Forge: every panel for the
-repo of the focused terminal:
+GitLab and GitHub panels for Herdr. Press ctrl-shift-f and the whole window becomes Forge: every
+panel for the repo of the focused terminal:
 
-- open merge requests, which you can merge or hand to an agent
-- pipelines
+- open merge requests (pull requests on GitHub), which you can merge or hand to an agent
+- pipelines (workflow runs on GitHub)
 - runners
 - milestones
 - a velocity chart
 - an issue browser with filters, editing, your own buttons and an optional triage agent
 
-The same panels also work as blocks in any layout.
+The same panels also work as blocks in any layout. GitLab means gitlab.com and self-hosted; GitHub
+means github.com and Enterprise Server. Each panel uses its forge's words: MRs, `!iid`, pipelines and
+stages on GitLab; PRs, `#iid`, workflow runs and workflows on GitHub.
 
 ![Forge](preview.png)
 
@@ -35,19 +37,20 @@ pill (10 px, bordered, `muted`), the project (11 px `dim`, truncated), the data'
 and ↻ (a braille spinner while loading). Hovering the header of a block in a layout adds ⧉ (open as
 a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
 
-- **MRs** ("Open MRs" / "Open PRs"): rounded-6 cards. Line one: `!iid` (11 px `dim`), Draft and
+- **MRs** ("Open MRs" / "Open PRs"): rounded-6 cards. Line one: `!iid` / `#iid` (11 px `dim`), Draft and
   Auto-merge chips, the title (13 px), a red ⚠ for conflicts, and a CI glyph (spinning ring in
   `working` while running, ✓ `ansi2`, ✗ `ansi1`, ▸ manual, – canceled). Line two (11 px `muted`):
   author, source branch, up to three label pills, age. Agents working on an MR show as small rows
   under it with their live status.
-- **Pipelines**: the last 20 as cards: a status icon in its color (success `ansi2`, failed `ansi1`,
-  running `ansi4`, pending `ansi3`, manual `ansi5`), the ref in 13 px semibold (`main` or `!811`), the
+- **Pipelines** ("Workflow runs" on GitHub): the last 20 as cards: a status icon in its color (success `ansi2`, failed `ansi1`,
+  running `ansi4`, pending `ansi3`, manual `ansi5`), the ref in 13 px semibold (`main`, `!811` or `#811`), the
   short sha, the age; below, the status word, `#iid` and source. An expanded card lists its jobs in 20
-  px rows under dim stage headings, with durations and an "allowed" tag for allowed failures.
+  px rows under dim stage (GitHub: workflow) headings, with durations and an "allowed" tag for allowed failures.
 - **Runners**: an "N/M up" pill in the header (red when none). Each runner: a dot (green idle, red
   offline, `muted` paused; a spinning ring while busy), its name, its state on the right, tag pills,
   and the jobs it runs with ticking elapsed times. Then "Running elsewhere" (`dim`) and "Queued"
-  (`ansi3`) sections; a queued job no online runner can take reads "no runner (tags)" in red.
+  (`ansi3`) sections; a queued job no online runner can take reads "no runner (tags)" in red. On
+  GitHub it lists the repository's self-hosted runners and needs admin rights; without them it says so.
 - **Milestones**: soonest due first. ▸/▾, the title, ↗, and the due text ("due in 3d", or a red
   "2d overdue" chip); under it a 4 px progress bar (`accent`, `ansi2` when done) and "3/5 closed · 2
   open". Expanded: its issues with ● / ✓, `#iid`, title and assignees.
@@ -65,32 +68,39 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
 ## How it behaves
 
 - ctrl-shift-f switches the window to the Forge layout for the focused terminal's repo, and back to
-  the layout you came from. The terminal's origin remote names the project, the terminal's machine
-  runs `glab`, and the terminal's checkout is where agents start. Outside a repo, Forge opens the last
+  the layout you came from. The terminal's origin remote names the project and its forge, the
+  terminal's machine runs `glab` (GitLab) or `gh` (GitHub), and the terminal's checkout is where
+  agents start. Outside a repo, Forge opens the last
   project. The layout file is only rewritten when the project changes.
 - Clicking a header collapses the panel in place. In a column it shrinks to its header. In a row it
   shrinks to a 34 px strip with the title's letters stacked. Collapsed and hidden panels stop polling.
 - Panels poll only while on screen: MRs every 60 s, CI every 10 s while a recent pipeline runs and the
   window is focused (else 60 s), runners 20 s / 60 s, milestones 5 min, velocity 5 min (commits) and
-  15 min (GitLab), issues 60 s focused / 5 min away. The first read after starting shows the cache at
+  15 min (forge), issues 60 s focused / 5 min away. The first read after starting shows the cache at
   once.
-- Merge asks "Merge into main?" and merges only the commit shown.
+- Merge asks "Merge into main?" and merges only the commit shown. It hides while CI runs or an agent
+  on the MR is working. On GitHub it uses the first method the repository allows (merge commit,
+  squash, rebase).
 - ✦ marks every button that starts an agent (a `task` or `agent` action); the rest act at once. Every
-  button has a tooltip saying what it does; Merge's says it uses no agent and when it turns on
-  auto-merge instead.
-- ✦ Get merged (id `ship`, MRs open a day or more) and ✦ Fix conflicts (id `resolve`, conflicted MRs,
-  red) ask first. Then they start Claude Code in a worktree of the branch. The task treats MR text as
-  untrusted. Get merged waits for a go-ahead before merging; Fix conflicts force-pushes and never
-  merges. Neither shows on fork MRs.
+  button has a tooltip saying what it does; Merge's says it uses no agent.
+- ✦ Get merged (id `ship`, MRs open a day or more), ✦ Fix conflicts (id `resolve`, conflicted MRs,
+  red) and ✦ Rebase (id `rebase`, MRs that must rebase or whose migration number is taken) ask
+  first. Then they start Claude Code in a worktree of the branch. The task treats MR text as
+  untrusted. Get merged waits for a go-ahead before merging; Fix conflicts and Rebase force-push and
+  never merge. None of them shows on fork MRs.
 - Agents already on an MR are listed under it: agents and live sub-agents whose folder is a
   checkout of the project (origin's path matches) on the MR's source branch. The pane's branch comes
   from Herdr; sub-agents' folders are asked with git (a minute apart; ten minutes where Herdr knows
   the branch). Merged with any `forge.requestAgents` another mod publishes.
-- With an owner, ✦ Get merged / ✦ Fix conflicts become ✦ Ask to merge / ✦ Ask to fix conflicts:
+- With an owner, the three become ✦ Ask to merge / ✦ Ask to fix conflicts / ✦ Ask to rebase:
   shows the message, then `hc send <agent> <text>` (a sub-agent's parent gets it). Hidden while the
   agent shows a prompt.
-- Issue edits are written to GitLab first, shown at once, and rolled back if GitLab refuses. One write
+- Issue edits are written to the forge first, shown at once, and rolled back if it refuses. One write
   runs at a time.
+- On GitHub: a PR's CI badge is its head commit's checks rolled into one status. Labels like
+  `priority: high` count as scoped (scope `priority`, value `high`; the `scopeSep` prop changes the
+  separator). Issue weight and blocking counts are GitLab-only. Velocity counts come from GitHub
+  search, which stops at 1000 results.
 - Keys: ↑/↓ or j/k move the selection, `/` searches, Esc clears, Enter opens in the browser.
 - Results of Merge, Retry, Cancel, buttons and comments also show as Herdr toasts.
 - Triage (optional): a box at the top of the filters shows the last run and the changes waiting. On
@@ -109,7 +119,7 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
   and `forge.py`, all copied from `shared/`.
 - `forge.py` runs on the `on` machine through `exec(python3 -I -c …)`. A small boot script runs
   `~/.local/share/herdr-forge/forge-<version>.py`, which is installed once per version.
-- `forge.py` calls `glab api` and caches every answer in SQLite. Each cached answer has a max age, a
+- `forge.py` calls `glab api` or `gh api` and caches every answer in SQLite. Each cached answer has a max age, a
   fetch lease and a per-host rate-limit pause.
   `forge.py` also does the filtering, sorting and bucketing. docs/contract.md has every command and
   shape.
@@ -139,8 +149,9 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
   Back) returns to the previous layout. Other project opens another space's repo.
 - Each panel shows its data, and after a restart shows it at once from the cache.
 - Clicking a header collapses it; clicking again restores its size.
-- A filter click in Issues narrows the list and the counts; a priority change shows at once and in
-  GitLab.
-- Merge asks, then merges; a failed pipeline's Retry starts it again.
+- A filter click in Issues narrows the list and the counts; a priority change shows at once and on
+  the forge.
+- Merge asks, then merges; a failed pipeline's (or workflow run's) Retry starts it again.
+- All of the above works for a GitLab project and for a GitHub one.
 - With triage on, Install skill installs it, Triage proposes priorities, Accept writes the label.
 - `npm test` passes and `herdr-app check` passes for every mod.
