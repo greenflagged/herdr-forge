@@ -189,6 +189,32 @@ Turn it on with `"triage": true` in the issue browser's settings. **Install skil
 priority, a rank and a one-line reason for every open issue. You accept or dismiss each proposal, or
 accept them all. Nothing changes on the forge until you accept. A priority you set by hand is kept.
 
+## Use it from your own tools
+
+Forge keeps your project's issues, requests and CI in a local cache. Your agents, scripts and
+other mods can read that cache too, so they don't each call `glab` or `gh` and run into the
+forge's rate limits.
+
+- **Agents and scripts** call `forge.py` at a fixed path. These commands keep their arguments
+  across releases: `query`, `show`, `search`, `sync`, `version`, plus the triage ones.
+
+  ```sh
+  F=~/.local/share/herdr-forge/forge.py
+  python3 $F sync  gitlab gitlab.com group/project      # fetch what changed since last time
+  python3 $F query gitlab gitlab.com group/project '{"state": "opened", "q": "login", "limit": 20}'
+  python3 $F show  gitlab gitlab.com group/project 123  # one issue, with comments and requests
+  ```
+
+  Each prints one JSON object. [docs/contract.md](docs/contract.md) lists the fields.
+- **Other mods** talk to the panels through shared state. They can list the agents working on a
+  merge request (`forge.requestAgents`), add buttons to requests and issues, or follow which issue
+  is open in the browser. A mod can also open a panel with its props: the issue browser takes
+  `issue` to open that issue at once.
+
+Those are the stable parts: they only gain things. You can also build panels on Forge's own JS
+(`lib.js`, `agents.js`, `cleanup.js`), but that code is provisional and changes between releases.
+[docs/contract.md](docs/contract.md) says what stays stable and what may change.
+
 ## On GitHub
 
 The panels work the same way; a few things follow from how GitHub works:
