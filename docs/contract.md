@@ -28,6 +28,13 @@ tested on gpui-shell 0.7.1 / herdr-app 0.1.9.
 install or run, not only when forge.py's text changes: Herdr never updates mods, and the
 release is the only thing that orders installs (0.1.1 did this for the packed install).
 
+## Opened by another mod
+
+Any forge panel can be opened as an overlay (`openOverlay({ mod, props, kind })`) with the
+props below. A panel opened that way (`props().overlay` set, no `dockTo`) shows ✕ Close in
+its header, so a `"window"` overlay can be closed; a `"dialog"` also closes on Esc. A panel
+the person detached from its block shows ↙ Dock it back instead.
+
 ## Props every forge mod takes
 
 ```json
@@ -515,6 +522,11 @@ several versions of forge.py against the same databases. The rules that keep tha
   - `git.db`: commit times per checkout (velocity), pruned after 30 days unused. `commits`
     only takes branch-like refs (letters, digits, `_ . / -`, not starting with `-`) and
     passes them after `--end-of-options` where the installed version supports it.
+- `layouts/forge.json` in Herdr's folder: rewritten by `forge-window` for each project it
+  shows. A block another package adds to it (any block whose mod isn't one of Forge's, such
+  as herdr-workstream's zero-height publisher) is kept across rewrites, in the column it was
+  in, or the left one when that column is gone (`keptBlocks` in `forge-window/window.js`).
+  Give such a block a unique `id`.
 - Cached answers nobody asked for in a week are deleted.
 - `~/.claude/skills/triage-issues/` only when the person clicks Install in Issues.
 - Removing everything: delete those folders.

@@ -4,7 +4,7 @@ import {
   exec, readTextFile, writeTextFile, appHome, props, theme, focused, spaces, panes, shared, setShared, run, closeOverlay, notify,
 } from "herdr";
 import { parseRemote, providerForHost } from "./lib.js";
-import { parseConfig, forgeLayout, projectFrom, withConfig } from "./window.js";
+import { parseConfig, forgeLayout, keptBlocks, projectFrom, withConfig } from "./window.js";
 import { button, pill } from "./ui.js";
 
 // Forge: ctrl-shift-f (keys.json: "mod.open:forge-window") turns the whole Herdr window into
@@ -58,11 +58,14 @@ async function resolve(where, config) {
 
 // Writes layouts/forge.json for a project (only when it changed: Herdr reloads the layout
 // and its panels on every write).
+// Blocks another package added (keptBlocks) are carried over.
 async function writeLayout(project, config) {
   const path = `${appHome()}/layouts/${LAYOUT}.json`;
-  const text = `${JSON.stringify(forgeLayout(withConfig(project, config), config), null, 2)}\n`;
   let current = null;
   try { current = await readTextFile(path); } catch { current = null; }
+  let kept = [];
+  try { kept = current ? keptBlocks(JSON.parse(current)) : []; } catch { kept = []; }
+  const text = `${JSON.stringify(forgeLayout(withConfig(project, config), config, kept), null, 2)}\n`;
   if (text !== current) await writeTextFile(path, text, current);
 }
 
