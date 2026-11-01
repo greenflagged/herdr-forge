@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  actionList, checkoutOf, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf,
+  actionList, checkoutOf, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, packScript, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf, WORKTREE,
 } from "../shared/lib.js";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { hasGit } from "./fixtures.js";
 
 test("projectOf defaults to GitLab and infers the provider from the host", () => {
   assert.equal(projectOf({ repo: "a/b" }).host, "gitlab.com");
@@ -132,6 +137,53 @@ test("runAction starts worktree actions in the request's checkout", async () => 
   assert.equal(h.calls.length, n, "nothing ran");
 });
 
+test("WORKTREE names the new worktree after the main checkout, wherever it runs", { skip: !hasGit }, () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "forge-wt-")));
+  const env = { ...process.env, HOME: dir, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const git = (cwd, ...a) => execFileSync("git", a, { cwd, env, encoding: "utf8" }).trim();
+  const run = (cwd, b) => spawnSync("sh", ["-c", WORKTREE, "sh", b], { cwd, env, encoding: "utf8" });
+  const made = (cwd, b, want, why) => {
+    const r = run(cwd, b);
+    assert.equal(r.status, 0, `${why}: ${r.stderr}`);
+    assert.equal(r.stdout, join(dir, ".herdr/worktrees", want), why);
+    return r.stdout;
+  };
+  try {
+    const origin = join(dir, "origin"), shop = join(dir, "shop");
+    git(dir, "init", "-q", "-b", "main", origin);
+    mkdirSync(join(origin, "src"));
+    writeFileSync(join(origin, "src/x"), "x\n");
+    git(origin, "add", "src");
+    git(origin, "commit", "-q", "-m", "one");
+    for (const b of ["feat/a", "feat/b", "feat/c", "feat/s", "feat/d", "feat/e"]) git(origin, "branch", b);
+    git(dir, "clone", "-q", origin, shop);
+
+    // A plain clone: shop.
+    const a = made(shop, "feat/a", "shop/feat-a", "from the main checkout: under its folder name");
+    made(a, "feat/b", "shop/feat-b", "from inside a linked worktree: still the main checkout's name");
+    assert.equal(run(a, "feat/a").stdout, a, "an existing worktree is found, not made again");
+    made(join(shop, "src"), "feat/c", "shop/feat-c", "from a subfolder of the main checkout: the checkout's name");
+
+    // A submodule (super/libs/shop): its own folder name, not modules or super.
+    const sup = join(dir, "super");
+    git(dir, "init", "-q", "-b", "main", sup);
+    git(sup, "-c", "protocol.file.allow=always", "submodule", "add", "-q", origin, "libs/shop");
+    made(join(sup, "libs/shop"), "feat/s", "shop/feat-s", "from a submodule: the submodule's folder name");
+
+    // Bare repos: shop.git gives shop, and so does proj/.bare.
+    const bare = join(dir, "bare/shop.git");
+    git(dir, "clone", "-q", "--bare", origin, bare);
+    const d = made(bare, "feat/d", "shop/feat-d", "from a bare shop.git: shop");
+    made(d, "feat/e", "shop/feat-e", "from a bare repo's worktree: shop");
+    const dotBare = join(dir, "proj/.bare");
+    git(dir, "clone", "-q", "--bare", origin, dotBare);
+    made(dotBare, "feat/d", "proj/feat-d", "from proj/.bare: proj");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("checkoutOf matches the repo's folder name exactly", () => {
   const spaces = [
     { machine: null, folder: "/home/me/src/other-shop" },
@@ -191,7 +243,10 @@ test("forgeClient's boot and install code runs under real python", async () => {
   const home = mkdtempSync(`${tmpdir()}/forge-`);
   const source = readFileSync(new URL("../shared/forge.py", import.meta.url), "utf8");
   const as = (v) => source.replace(/^VERSION = "[^"]*"/m, `VERSION = "${v}"`);
-  const exec = (bin, args) => new Promise((resolve, reject) => execFile(bin, args, { env: { HOME: home, PATH: process.env.PATH } },
+  // An ASCII-only locale with UTF-8 mode off: a text read or write of forge.py (it has a
+  // non-ASCII line) would fail here, so this proves boot and INSTALL handle it as bytes.
+  const exec = (bin, args) => new Promise((resolve, reject) => execFile(bin, ["-X", "utf8=0", ...args],
+    { env: { HOME: home, PATH: process.env.PATH, LC_ALL: "C" } },
     (err, stdout, stderr) => (err && err.code === "ENOENT" ? reject(err) : resolve({ code: err?.code ?? 0, stdout, stderr }))));
   const dir = `${home}/.local/share/herdr-forge`;
 
@@ -200,6 +255,8 @@ test("forgeClient's boot and install code runs under real python", async () => {
   const answers = await Promise.all(clients.map((f) => f(["version"])));
   assert.ok(answers.every((a) => a.version === "0.2.0+aa"), JSON.stringify(answers));
   assert.ok(existsSync(`${dir}/forge-0.2.0+aa.py`));
+  assert.deepEqual(readFileSync(`${dir}/forge-0.2.0+aa.py`), Buffer.from(as("0.2.0+aa")), "byte for byte what the mod ships");
+  assert.ok(/[^\x00-\x7f]/.test(source), "forge.py still has a non-ASCII line, or this proves less");
   assert.match(readFileSync(`${dir}/forge.py`, "utf8"), /VERSION = "0.2.0\+aa"/, "a stable path for agents");
   const { statSync } = await import("node:fs");
   assert.equal(statSync(dir).mode & 0o777, 0o700, "the folder (caches with issue text) is private");
@@ -223,12 +280,78 @@ test("forgeClient's boot and install code runs under real python", async () => {
 
 test("forge.py stays small enough to send as one argument", async () => {
   const { statSync } = await import("node:fs");
-  // Linux caps one argument at 131,072 bytes. What ships is the stamped mods/*/forge.py (9 bytes
-  // more than this file), sent raw as one argv entry (lib.js forgeClient, INSTALL): at this guard
-  // ~11 KB remains on a direct exec, and less if Herdr runs it through ssh / `sh -c` (quoting turns
-  // each ' into 4 bytes; unverified which transport it uses). Before the next sizeable feature,
-  // compress the install payload or send it in parts (lib.js INSTALL, sync.mjs).
-  assert.ok(statSync(new URL("../shared/forge.py", import.meta.url)).size < 120_000);
+  const { expected } = await import("../scripts/sync.mjs");
+  // Linux caps one argument at 131,072 bytes. What INSTALL gets is packScript(the stamped
+  // mods/*/forge.py), one argv entry. This measures Node's zlib; Herdr's packs the same text
+  // about 170 bytes smaller. Base64 needs no shell quoting (at most 2 bytes if Herdr's remote
+  // hop wraps it), and INSTALL itself is under 1 KB, so even one `sh -c` string stays under the cap.
+  const stamped = expected().get("mods/forge-requests/forge.py");
+  const packed = packScript(stamped);
+  assert.match(packed, /^[A-Za-z0-9+/=]+$/);
+  assert.ok(packed.length < 120_000, `${packed.length}`);
+  // Raw size: every forge.py call compiles the whole file (boot), so the cost of each spawn
+  // grows with it. Past this, decide on purpose (a bytecode cache, or splitting it up).
+  assert.ok(statSync(new URL("../shared/forge.py", import.meta.url)).size < 250_000);
+});
+
+test("sync copies agents.js and cleanup.js only into the mods that import them", async () => {
+  const { expected } = await import("../scripts/sync.mjs");
+  const out = expected();
+  assert.ok(out.has("mods/forge-requests/agents.js"));
+  assert.ok(out.has("mods/forge-requests/cleanup.js"));
+  assert.ok(!out.has("mods/forge-ci/agents.js"));
+  assert.ok(!out.has("mods/forge-ci/cleanup.js"));
+  assert.ok(out.has("mods/forge-ci/lib.js"), "lib.js still goes everywhere");
+});
+
+test("a stray agents.js in a mod that doesn't import it: sync deletes an exact copy, leaves an edited one", async () => {
+  const { cpSync, existsSync, readFileSync, writeFileSync } = await import("node:fs");
+  const { stale, sync } = await import("../scripts/sync.mjs");
+  const base = mkdtempSync(join(tmpdir(), "forge-sync-"));
+  try {
+    const here = new URL("..", import.meta.url).pathname;
+    for (const d of ["shared", "mods", "package.json"]) cpSync(join(here, d), join(base, d), { recursive: true });
+    assert.deepEqual(stale(base), []);
+    const stray = join(base, "mods/forge-ci/agents.js");
+    writeFileSync(stray, readFileSync(join(base, "shared/agents.js")));
+    assert.deepEqual(stale(base), ["mods/forge-ci/agents.js (not imported there: sync deletes it)"]);
+    sync(base);
+    assert.ok(!existsSync(stray));
+    assert.ok(existsSync(join(base, "mods/forge-requests/agents.js")), "an imported copy stays");
+    assert.deepEqual(stale(base), []);
+
+    writeFileSync(stray, "// someone's edit\n");
+    const edited = ["mods/forge-ci/agents.js (not imported there: it differs from shared/, so sync leaves it; delete it by hand)"];
+    assert.deepEqual(stale(base), edited);
+    sync(base);
+    assert.equal(readFileSync(stray, "utf8"), "// someone's edit\n", "an edited stray is left alone");
+    assert.deepEqual(stale(base), edited, "and --check keeps naming it");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("sync counts dynamic and side-effect imports of a shared module", async () => {
+  const { cpSync, existsSync, readFileSync, writeFileSync } = await import("node:fs");
+  const { expected, stale, sync } = await import("../scripts/sync.mjs");
+  const base = mkdtempSync(join(tmpdir(), "forge-sync-"));
+  try {
+    const here = new URL("..", import.meta.url).pathname;
+    for (const d of ["shared", "mods", "package.json"]) cpSync(join(here, d), join(base, d), { recursive: true });
+    const main = join(base, "mods/forge-ci/main.js");
+    const text = readFileSync(main, "utf8");
+    for (const [line, f] of [['const { claimLooks } = await import("./agents.js");', "agents.js"], ['import "./cleanup.js";', "cleanup.js"]]) {
+      writeFileSync(main, `${text}\n${line}\n`);
+      assert.ok(expected(base).has(`mods/forge-ci/${f}`), line);
+      sync(base);
+      assert.ok(existsSync(join(base, "mods/forge-ci", f)), `${line}: copied, not deleted`);
+      assert.deepEqual(stale(base), []);
+    }
+    writeFileSync(main, `${text}\n// import("./agents.js");\n`);
+    assert.ok(!expected(base).has("mods/forge-ci/agents.js"), "a // line doesn't count");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test("findBlocks and collapse sizes", () => {

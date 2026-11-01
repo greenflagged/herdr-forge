@@ -3,7 +3,7 @@ name: triage-issues
 description: Propose a priority, a global rank and a one-line reason for every open issue in a GitLab or GitHub project, for the person to accept or dismiss in Herdr's Issues tab (herdr-forge). Invoked as `/triage-issues <provider> <host> <owner/project>`, e.g. `/triage-issues gitlab gitlab.com acme/shop`. Reads the local issue cache; never edits the forge.
 ---
 
-<!-- Shipped with herdr-forge 0.1.0 (installed by the Issues tab; a newer release replaces it) -->
+<!-- Shipped with herdr-forge 0.1.1 (installed by the Issues tab; a newer release replaces it) -->
 
 # triage-issues
 

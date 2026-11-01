@@ -1,7 +1,10 @@
 // Shared helpers for the forge-* mods. Herdr mods can only import from their own folder,
 // so every mod carries an identical copy: edit shared/lib.js and run `npm run sync`.
 // Nothing here imports from Herdr (callers pass in what's needed), so the tests run
-// under plain Node.
+// under plain Node. The two imports are Herdr's Node-compatible builtins (gpui-shell 0.7.1).
+
+import { deflateSync } from "zlib";
+import { Buffer } from "buffer";
 
 // ---- forges ----
 
@@ -14,6 +17,22 @@ export const TERMS = {
     name: "GitHub", cli: "gh", request: "PR", requests: "Pull requests", reqPrefix: "#",
     ci: "Workflow runs", ciRun: "run", group: "workflow", host: "github.com",
   },
+};
+
+// A CI status as a one-glyph badge: glyph (null: spinner), theme color, still going.
+// Statuses are GitLab's words on every forge (docs/contract.md).
+export const CI = {
+  created: [null, "working", true],
+  waiting_for_resource: [null, "working", true],
+  preparing: [null, "working", true],
+  pending: [null, "working", true],
+  running: [null, "working", true],
+  scheduled: [null, "working", true],
+  manual: ["▸", "muted", false],
+  success: ["✓", "ansi2", false],
+  failed: ["✗", "ansi1", false],
+  canceled: ["–", "dim", false],
+  skipped: ["–", "dim", false],
 };
 
 // The forge a host runs, or null for forges we don't support. props.forges can name
@@ -45,7 +64,7 @@ export function parseRemote(url) {
 
 // ---- running forge.py ----
 
-// POSIX machines only (macOS, Linux): the script goes over as one argument.
+// POSIX machines only (macOS, Linux): the script goes over as one argument, packed (packScript).
 const PYTHONS = ["python3", "/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"];
 // The same folder forge.py uses: $HERDR_FORGE_HOME, else $XDG_DATA_HOME/herdr-forge.
 const DIR = `d=os.environ.get("HERDR_FORGE_HOME") or os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"),"herdr-forge")`;
@@ -60,27 +79,28 @@ if not os.path.exists(p):
 try: os.utime(p)
 except OSError: pass
 sys.argv=[p]+sys.argv[1:]
-exec(compile(open(p).read(),p,"exec"),{"__name__":"__main__","__file__":p})`;
+exec(compile(open(p,"rb").read(),p,"exec"),{"__name__":"__main__","__file__":p})`;
 
 // Writes forge-<version>.py (what boot runs), and forge.py (the stable path agents and
 // skills call) unless a newer release is already there; removes versions unused for two
 // weeks. Every mod may install at once on first start: each writes its own temp file.
 // The folder also holds the caches (issue text): private to its owner, like forge.py makes it.
-const INSTALL = `import os,sys,glob,time,re
+// The script arrives packed (packScript) and is written as the bytes it was, whatever the locale.
+const INSTALL = `import os,sys,glob,time,re,zlib,base64
 os.umask(0o077)
 ${DIR}
 os.makedirs(d,mode=0o700,exist_ok=True)
 try: os.chmod(d,0o700)
 except OSError: pass
-v,t=sys.argv[1],sys.argv[2]
+v,t=sys.argv[1],zlib.decompress(base64.b64decode(sys.argv[2]))
 rel=lambda s:tuple(int(x) for x in re.findall(r"\\d+",s.split("+")[0]))
 def put(n):
     f=os.path.join(d,n); tmp="%s.%d"%(f,os.getpid())
-    with open(tmp,"w") as o: o.write(t)
+    with open(tmp,"wb") as o: o.write(t)
     os.replace(tmp,f)
 put("forge-%s.py"%v)
 try:
-    with open(os.path.join(d,"forge.py")) as o: old=re.search(r'^VERSION = "([^"]+)"',o.read(),re.M).group(1)
+    with open(os.path.join(d,"forge.py"),"rb") as o: old=re.search(rb'^VERSION = "([^"]+)"',o.read(),re.M).group(1).decode()
 except Exception: old="0"
 if rel(v)>=rel(old): put("forge.py")
 for f in glob.glob(os.path.join(d,"forge-*.py")):
@@ -88,6 +108,12 @@ for f in glob.glob(os.path.join(d,"forge-*.py")):
         if not f.endswith("forge-%s.py"%v) and time.time()-os.path.getmtime(f)>14*86400: os.remove(f)
     except OSError: pass
 print('{"ok": true}')`;
+
+// What goes over to INSTALL: base64(zlib(text)). Linux caps one argument at 131,072 bytes;
+// packed, forge.py is a third of that (test/lib.test.js guards it).
+export function packScript(text) {
+  return Buffer.from(deflateSync(text)).toString("base64");
+}
 
 export function versionOf(text) {
   return /^VERSION = "([^"]+)"/m.exec(text ?? "")?.[1] ?? "dev";
@@ -104,7 +130,7 @@ function parseOut(r, what) {
 // The script goes over once per machine and version; after that only a short boot does.
 // An answer with `error` is returned, not thrown: callers keep stale data and show why.
 export function forgeClient(h, scriptPath) {
-  let text = null, ver = null;
+  let text = null, ver = null, packed = null; // packed only when an install needs it
   const bins = new Map(); // machine -> the python that started there
   async function py(args, on) {
     const known = bins.get(on);
@@ -124,7 +150,8 @@ export function forgeClient(h, scriptPath) {
     for (let i = 0; i < 2; i++) {
       const out = parseOut(await py(["-I", "-c", boot(ver), ...args.map(String)], on), "python3");
       if (!out?.install) return out;
-      const done = parseOut(await py(["-I", "-c", INSTALL, ver, text], on), "python3");
+      packed ??= packScript(text);
+      const done = parseOut(await py(["-I", "-c", INSTALL, ver, packed], on), "python3");
       if (!done?.ok) throw new Error(done?.error ?? "couldn't install forge.py");
     }
     throw new Error("couldn't install forge.py");
@@ -369,13 +396,19 @@ export function issueItem(i, project, sep = "::") {
 }
 
 // The folder with a request's branch checked out, on `on`: its worktree if it has one,
-// else a new one next to Herdr's (~/.herdr/worktrees/<repo>/<branch>). Runs in the main
-// checkout with the branch as $1; prints the folder.
+// else a new one next to Herdr's (~/.herdr/worktrees/<checkout>/<branch>). Runs in the
+// checkout (the main one or any linked worktree) with the branch as $1; prints the folder.
+// <checkout> is the main checkout's folder name: the first entry of `git worktree list`,
+// as CLEAN_WORKTREE finds it, so a run from a linked worktree or a subfolder still uses it.
+// A bare repo's entry is the repo itself: shop.git and shop/.bare (or shop/.git) give shop.
 export const WORKTREE = `b="$1"
 wt=$(git worktree list --porcelain | awk -v ref="refs/heads/$b" '/^worktree /{w=substr($0,10)} $0=="branch "ref{print w; exit}')
 if [ -z "$wt" ]; then
   git fetch -q origin "$b" || exit 1
-  wt="$HOME/.herdr/worktrees/$(basename "$PWD")/$(printf %s "$b" | tr / -)"
+  main=$(git worktree list --porcelain | sed -n '1s/^worktree //p')
+  main=\${main%/}; main=\${main%/.bare}; main=\${main%.git}; main=\${main%/}
+  [ -n "$main" ] || exit 1
+  wt="$HOME/.herdr/worktrees/$(basename "$main")/$(printf %s "$b" | tr / -)"
   git worktree add -q "$wt" "$b" >&2 || exit 1
 fi
 printf %s "$wt"`;
