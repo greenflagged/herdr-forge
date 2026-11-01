@@ -593,11 +593,47 @@ class Forge(unittest.TestCase):
         updated = db.execute("SELECT updated_at FROM issues WHERE iid=1").fetchone()[0]
         db.execute("INSERT OR REPLACE INTO details(iid, for_updated_at, json) VALUES(1, ?, ?)",
                    (updated, json.dumps({"notes": [{"author": "a", "body": "b", "at_ms": 1}],
-                                         "requests": [{"iid": 3, "title": "t", "state": "opened", "draft": False, "source": "s", "url": "u"}]})))
+                                         "requests": [{"iid": 3, "title": "t", "state": "merged", "draft": False, "source": "s", "url": "u"}]})))
         db.commit()
         old = self.run_forge("show", *P, 1)
         self.assertIsNone(old["notes"][0]["id"], "a row from an older version answers id null")
         self.assertEqual((old["requests"][0]["sha"], old["requests"][0]["via"]), (None, None))
+
+    def test_show_doesnt_keep_an_open_request_state_after_it_merged(self):
+        # Merging a linked request doesn't change the issue's updated_at, which the details
+        # are keyed on.
+        mrs = [{"iid": 3, "title": "t", "state": "merged", "draft": False, "source_branch": "s", "web_url": "u"}]
+        self.routes([[r"-X POST", {"out": {}}], [r"notes\?sort=desc", {"out": []}], [r"notes\?sort=asc", {"out": []}],
+                     [r"related_merge_requests", {"out": mrs}], [r"issues/1$", {"out": issue(1)}]])
+        self.run_forge("comment", *P, 1, "hi")  # caches issue 1
+        db = self.db()
+        updated = db.execute("SELECT updated_at FROM issues WHERE iid=1").fetchone()[0]
+
+        def put(state, at):
+            req = {"iid": 3, "title": "t", "state": state, "draft": False, "source": "s", "url": "u"}
+            db.execute("INSERT OR REPLACE INTO details(iid, for_updated_at, json) VALUES(1, ?, ?)",
+                       (updated, json.dumps({"notes": [], "requests": [req], "_at": at})))
+            db.commit()
+
+        state = lambda: self.run_forge("show", *P, 1)["requests"][0]["state"]
+        put("opened", time.time())
+        n = len(self.calls())
+        self.assertEqual(state(), "opened", "fresh details are trusted")
+        self.assertEqual(len(self.calls()), n, "and not fetched again")
+        db.execute("INSERT OR REPLACE INTO cache(k, at, json, shape, lease) VALUES('merged@2', ?, ?, 2, 0)",
+                   (time.time(), json.dumps([{"iid": 3}])))
+        db.commit()
+        self.assertEqual(state(), "merged", "the cached merged answer wins over older details")
+        self.assertEqual(len(self.calls()), n)
+        db.execute("DELETE FROM cache WHERE k='merged@2'")
+        db.commit()
+        put("opened", time.time() - 600)
+        self.assertEqual(state(), "merged", "details naming an open request are fetched again once old")
+        self.assertGreater(len(self.calls()), n)
+        put("merged", time.time() - 600)
+        n = len(self.calls())
+        self.assertEqual(state(), "merged")
+        self.assertEqual(len(self.calls()), n, "old details with no open request are kept")
 
     def test_issue_notes_say_when_they_stopped_short(self):
         self.routes([[r"notes\?sort=desc", {"out": [{"id": k, "author": {"username": "bot"}, "body": "", "system": True,
