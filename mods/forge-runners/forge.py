@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.2+61d9af3e8127"
+VERSION = "0.1.3+1a20d9fe62af"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -53,6 +53,8 @@ MERGED_DAYS = 7                 # how far back `merged` looks
 MILESTONE_PAGES = 5             # pages of 100 issues `milestone-issues` walks, most recently updated first
 PEEK_MAX_AGE = 3600             # seconds a cached `requests` / `merged` answer may be joined into another,
                                 # and a complete `milestone-issues` answer kept over a partial one
+DETAIL_OPEN_AGE = 120           # seconds cached issue details naming an open request are trusted
+                                # (a merge doesn't change the issue's updated_at)
 PRIORITIES = ["blocker", "critical", "high", "medium", "low"]
 START = time.time()
 
@@ -1934,9 +1936,17 @@ class Project:
         desc, updated = r
         d = self.db.execute("SELECT for_updated_at, json FROM details WHERE iid=?", (iid,)).fetchone()
         error = None
-        if refetch or not d or d[0] != updated:
+        # Details are keyed on the issue's updated_at, but merging or closing a linked request
+        # doesn't change it: details that still name an open request are fetched again once
+        # they are DETAIL_OPEN_AGE old (`_at`: when they were fetched; older rows have none).
+        open_stale = False
+        if d and d[0] == updated and not refetch:
+            had = json.loads(d[1])
+            open_stale = (any(r.get("state") == "opened" for r in had.get("requests", []))
+                          and time.time() - (had.get("_at") or 0) > DETAIL_OPEN_AGE)
+        if refetch or not d or d[0] != updated or open_stale:
             try:
-                detail = self.forge.issue_detail(iid)
+                detail = {**self.forge.issue_detail(iid), "_at": time.time()}
                 self.db.execute("INSERT OR REPLACE INTO details(iid, for_updated_at, json) VALUES(?,?,?)",
                                 (iid, updated, json.dumps(detail)))
                 self.db.commit()
@@ -1952,9 +1962,14 @@ class Project:
         # on one line.
         notes = [{**n, "id": n.get("id"), "author": one_line(n.get("author")), "body": plain_text(n.get("body"))}
                  for n in detail.get("notes", [])]
+        # A request the cached `merged` answer lists is merged, whatever older details say.
+        got = self.peek("merged")
+        merged_now = {m.get("iid") for m in (got[0] if got and isinstance(got[0], list) else []) if isinstance(m, dict)}
         # sha, merged_ms and via: `milestone-issues` fills them; null here.
         reqs = [{**r, "title": one_line(r.get("title")), "source": one_line(r.get("source")), "sha": r.get("sha"),
-                 "merged_ms": r.get("merged_ms"), "via": r.get("via")} for r in detail.get("requests", [])]
+                 "merged_ms": r.get("merged_ms"), "via": r.get("via"),
+                 **({"state": "merged"} if r.get("state") == "opened" and r.get("iid") in merged_now else {})}
+                for r in detail.get("requests", [])]
         return {"iid": iid, "issue": self.issue_out(iid), "description": plain_text(desc), "notes": notes,
                 "requests": reqs, "error": error, "launches": launches,
                 "triage": {"rank": t[0], "priority": t[1], "reason": one_line(t[2]), "status": t[3], "locked": bool(t[4])} if t else None}
