@@ -139,7 +139,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `whoami P <maxAge> <force>` | `{user, at, error}`: the account the forge's CLI is logged in as on this host (GitLab `username`, GitHub `login`), the same name `Note.author` gives its comments; `user` null until one fetch succeeds |
 | `velocity P <maxAge> <force> <12w\|30d> <nowMs> <tz>` | `{n, size, start, edges, at, error, rows: [Row]}` with row keys `merged`, `closed`, `cycle` |
 | `commits <top> <ref> <12w\|30d> <nowMs> <tz> <force> [quick]` | `{n, size, start, edges, at, fetched, error, row: Row, total}`: run on the repo's machine. No maxAge: it re-reads git every 5 min and fetches an `origin/*` ref every 15; an empty ref means HEAD. `quick` 1: answer from the cache without git (a local `git log` when nothing is cached, never a fetch), for a panel's first draw |
-| `sync P <since> <force>` | `{now, last_sync, error, changed, more, triage_at, triage_run}`: `changed` counts issues written after `since` (an issue the forge sends again unchanged isn't rewritten) |
+| `sync P <since> <force>` | `{now, last_sync, error, changed, more, triage_at, triage_run}`: `changed` counts issues written after `since` (an issue the forge sends again unchanged isn't rewritten). Renaming or deleting a label in use doesn't change its issues, so the hourly label check notices and answers `more: true`, and the following calls read and rewrite every issue |
 | `meta P` | `{labels: [{name, color, description}], milestones: [{id, title, due}], sep}` |
 | `query P <json>` | `{rows, offset, matched, total, counts, scopes, sep}` (below) |
 | `search P <text>` | `{iids}`: full-text matches, best first |
