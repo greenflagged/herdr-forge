@@ -1,7 +1,8 @@
 # Forge
 
-GitLab and GitHub panels for Herdr. Press ctrl-shift-f and the whole window becomes Forge: every
-panel for the repo of the focused terminal:
+Your GitLab or GitHub project inside Herdr, with buttons that hand merge requests and issues to an
+AI agent. Press ctrl-shift-f and the whole window becomes Forge: every panel for the
+repo of the focused terminal:
 
 - open merge requests (pull requests on GitHub), which you can merge or hand to an agent
 - pipelines (workflow runs on GitHub)
