@@ -84,6 +84,14 @@ test("cleanupPlan closes a worktree's own tab, removes the worktree, and keeps w
   assert.deepEqual(plan2.tabs, []);
   assert.deepEqual(plan2.kept, [{ top: "/wt/add-csv", why: "it has commits that weren't merged" }]);
   assert.deepEqual(cleanupLines(plan2), ["End worker", "Keep /wt/add-csv: it has commits that weren't merged"]);
+
+  // No head commit from the forge: the tab still closes, but the worktree can't be checked, so it stays.
+  const m3 = merged({ head_sha: null });
+  const plan3 = cleanupPlan(m3, ownersOf(m3, pl, g, project), pl, after.panes, after.terminals, g);
+  assert.deepEqual(plan3.tabs, [{ id: "tab1", name: "fix-login" }]);
+  assert.deepEqual(plan3.worktrees, []);
+  assert.deepEqual(plan3.kept, [{ top: "/wt/fix-login", why: "the request's head commit is unknown" }]);
+  assert.ok(cleanupLines(plan3).includes("Keep /wt/fix-login: the request's head commit is unknown"));
 });
 
 test("cleanupPlan waits while an owner or one of its sub-agents is busy", () => {
@@ -141,9 +149,16 @@ test("a merged request whose worker exited still shows, and Clean up removes the
   // Kept: more commits than merged, or a terminal still open in it.
   assert.deepEqual(cleanupPlan(merged({ head_sha: "h9" }), [], pl, [], [], new Map(), [wts[0]]).kept,
     [{ top: "/wt/fix-login", why: "it has commits that weren't merged" }]);
+  for (const head_sha of [null, undefined, ""]) {
+    assert.deepEqual(cleanupPlan(merged({ head_sha }), [], pl, [], [], new Map(), [wts[0]], "mac"),
+      { blocked: null, tabs: [], kills: [], worktrees: [], kept: [{ top: "/wt/fix-login", why: "the request's head commit is unknown" }] },
+      `no head commit (${head_sha}): kept, not removed`);
+  }
   const shell = [{ pane: "p5", tab: "tab5", terminal: "t5", cwd: "/wt/fix-login/src" }];
   assert.deepEqual(cleanupPlan(m, [], pl, shell, [], new Map(), [wts[0]]),
     { blocked: null, tabs: [], kills: [], worktrees: [], kept: [{ top: "/wt/fix-login", why: "a terminal is open in it" }] });
+  assert.deepEqual(cleanupPlan(merged({ head_sha: null }), [], pl, shell, [], new Map(), [wts[0]]).kept,
+    [{ top: "/wt/fix-login", why: "a terminal is open in it" }], "an open terminal is still the reason given first");
   assert.equal(cleanupPlan(m, [], pl, [], [{ address: "t6", state: "live", cwd: "/wt/fix-login" }], new Map(), [wts[0]]).kept.length, 1);
   assert.equal(cleanupPlan(m, [], pl, [{ pane: "p5", cwd: "/wt/fix-login-2" }], [], new Map(), [wts[0]]).worktrees.length, 1,
     "a sibling folder with a longer name isn't inside it");
@@ -215,9 +230,17 @@ test("GIT_LOOK and CLEAN_WORKTREE against a real worktree", { skip: !hasGit }, (
     r = sh(CLEAN_WORKTREE, dir, wt, "fix-login", head);
     assert.equal(r.status, 4, r.stdout);
     assert.ok(existsSync(join(wt, "notes.txt")), "nothing removed");
+    // The linked-worktree and branch checks still come before the empty-head refusal.
     assert.match(sh(CLEAN_WORKTREE, dir, repo, "main", "").stdout, /isn't a linked worktree/);
+    assert.match(sh(CLEAN_WORKTREE, dir, wt, "other-branch", "").stdout, /isn't on other-branch any more/);
 
     rmSync(join(wt, "notes.txt"));
+    // Clean and on its branch, but no merged head to compare with: refuses, removes nothing.
+    r = sh(CLEAN_WORKTREE, dir, wt, "fix-login", "");
+    assert.equal(r.status, 3, r.stdout);
+    assert.match(r.stdout, /head commit .* unknown/);
+    assert.ok(existsSync(wt), "worktree kept");
+    assert.match(git(repo, "branch", "--list", "fix-login"), /fix-login/, "branch kept");
     r = sh(CLEAN_WORKTREE, dir, wt, "fix-login", head);
     assert.equal(r.status, 0, r.stdout);
     assert.ok(!existsSync(wt));

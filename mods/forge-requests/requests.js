@@ -2,6 +2,7 @@
 // under plain Node.
 
 import { CI, requestItem } from "./lib.js";
+import { cleanupLines } from "./cleanup.js";
 
 // Get merged (id "ship"), Fix conflicts (id "resolve") and Rebase (id "rebase"), worded for the forge (terms from projectOf). Their tasks and confirm
 // questions are templates: runAction fills {ref}, {repo}, {title}, {url}, {source},
@@ -216,4 +217,11 @@ export function clashText(clashes, terms) {
   const parts = [...new Map(clashes.map((c) => [`${c.version}|${c.by}`, c])).values()].map((c) =>
     `${c.name} uses version ${c.version}, which ${c.by === "target" ? "the target branch already has" : `${terms.reqPrefix}${c.by} also adds`}`);
   return `Renumber the migration to the next free version after rebasing: ${parts.join("; ")}.`;
+}
+
+// The notice when Clean up finds nothing to close, end or remove (emptyPlan). If it kept a
+// worktree, say which and why: otherwise the row stays with no hint of what's holding it.
+export function nothingToCleanText(plan) {
+  if (!plan.kept?.length) return "Nothing left to clean up.";
+  return `Nothing to remove. ${cleanupLines(plan).join("; ")}.`;
 }

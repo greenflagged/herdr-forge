@@ -138,7 +138,7 @@ Hover a merged MR for **Clean up**. It shows you exactly what will go, then:
   `git worktree list` in the project's checkout on the forge machine every couple of minutes.
 
 It keeps the worktree when it has uncommitted changes, untracked files, commits that weren't
-merged, or a terminal open in it. It skips locked worktrees and never touches the main checkout.
+merged, or a terminal open in it, and when the forge didn't say which commit merged. It skips locked worktrees and never touches the main checkout.
 It waits while any of those agents is working or needs you. The button is solid once the merge is deployed. Before that it still works, and its
 confirm says what hasn't happened yet (say, the pipeline failed on the merge commit).
 

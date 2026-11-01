@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { CI, actionLabel, actionList, describe, fill, matches, projectOf, requestItem } from "../shared/lib.js";
 import {
   checkoutOf, defaultActions, itemOf, mergeTip, mergeBlocked, askText,
-  MIGRATIONS, migrationPattern, migrationsOf, orderFacts, clashText, versionKey,
+  MIGRATIONS, migrationPattern, migrationsOf, orderFacts, clashText, versionKey, nothingToCleanText,
 } from "../mods/forge-requests/requests.js";
 import { now, request } from "./fixtures.js";
 
@@ -175,4 +175,14 @@ test("orderFacts: dotted versions clash with their equals on the target and in o
   const f = orderFacts(reqs, order, MIGRATIONS);
   assert.deepEqual(f.get(1).clashes, [{ version: "1.2", name: "V1_2__one.sql", by: 2 }, { version: "3.1", name: "V3.1__mine.sql", by: "target" }]);
   assert.deepEqual(f.get(2).clashes, [{ version: "1.2", name: "V1.2.0__two.sql", by: 1 }]);
+});
+
+test("Clean up with nothing to remove says what it kept and why", () => {
+  const none = { blocked: null, tabs: [], kills: [], worktrees: [], kept: [] };
+  assert.equal(nothingToCleanText(none), "Nothing left to clean up.");
+  assert.equal(nothingToCleanText({ ...none, kept: undefined }), "Nothing left to clean up.");
+  assert.equal(nothingToCleanText({ ...none, kept: [{ top: "/wt/fix-login", why: "the request's head commit is unknown" }] }),
+    "Nothing to remove. Keep /wt/fix-login: the request's head commit is unknown.");
+  assert.equal(nothingToCleanText({ ...none, kept: [{ top: "/wt/a", why: "x" }, { top: "/wt/b", why: "y" }] }),
+    "Nothing to remove. Keep /wt/a: x; Keep /wt/b: y.");
 });
