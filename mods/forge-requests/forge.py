@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.1+867114d8d39e"
+VERSION = "0.1.1+50f4f7e4448d"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -269,7 +269,7 @@ def cycle_row(key, pairs, b, now_ms):
 class Cli:
     """Talks to a forge through its logged-in CLI (`glab api` / `gh api`), which both take
     the same flags."""
-    name = cli = sep = None
+    name = cli = sep = login = None
 
     def __init__(self, p):
         self.p = p
@@ -359,11 +359,19 @@ class Cli:
         """Whether a pending job that none of the project's runners can take is stuck."""
         return True
 
+    def whoami(self):
+        """The account the CLI is logged in as on this host: the name Note.author gives its comments."""
+        user = (self.api("user") or {}).get(self.login)
+        if not isinstance(user, str) or not user:
+            raise RuntimeError(f"{self.cli} didn't say who is logged in on {self.p.host}")
+        return user
+
 
 class GitLab(Cli):
     name = "gitlab"
     cli = "glab"
     sep = "::"
+    login = "username"
 
     def __init__(self, p):
         super().__init__(p)
@@ -796,6 +804,7 @@ class GitHub(Cli):
     name = "github"
     cli = "gh"
     sep = ": "
+    login = "login"
 
     def __init__(self, p):
         super().__init__(p)
@@ -1944,6 +1953,10 @@ class Project:
                  for x in data["notes"]]
         return {"notes": notes, "partial": data["partial"], "at": at, "error": err}
 
+    def whoami(self, max_age, force):
+        user, at, err = self.cached("whoami", max_age, self.forge.whoami, None, force)
+        return {"user": one_line(user) if user else None, "at": at, "error": err}
+
     def comment(self, iid, body):
         self.forge.issue_comment(iid, body)
         self.drop(f"notes:{iid}")
@@ -2205,6 +2218,7 @@ def main(argv):
         "milestones": lambda: p.milestones(age(0), force(1)),
         "milestone-items": lambda: p.milestone_items(a[0], age(1), force(2)),
         "milestone-issues": lambda: p.milestone_issues(a[0], age(1), force(2)),
+        "whoami": lambda: p.whoami(age(0), force(1)),
         "issue-notes": lambda: p.issue_notes(int(a[0]), age(1), force(2), a[3] if len(a) > 3 else 20),
         "velocity": lambda: p.velocity(age(0), force(1), a[2], int(a[3]), a[4]),
         "sync": lambda: p.sync(float(a[0]) if a else 0, force(1)),

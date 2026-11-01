@@ -396,13 +396,16 @@ export function issueItem(i, project, sep = "::") {
 }
 
 // The folder with a request's branch checked out, on `on`: its worktree if it has one,
-// else a new one next to Herdr's (~/.herdr/worktrees/<repo>/<branch>). Runs in the main
-// checkout with the branch as $1; prints the folder.
+// else a new one next to Herdr's (~/.herdr/worktrees/<checkout>/<branch>). Runs in the
+// checkout (the main one or any linked worktree) with the branch as $1; prints the folder.
+// <checkout> is the main checkout's folder name (the parent of the common .git), so one
+// started from inside a worktree doesn't land under that worktree's name.
 export const WORKTREE = `b="$1"
 wt=$(git worktree list --porcelain | awk -v ref="refs/heads/$b" '/^worktree /{w=substr($0,10)} $0=="branch "ref{print w; exit}')
 if [ -z "$wt" ]; then
   git fetch -q origin "$b" || exit 1
-  wt="$HOME/.herdr/worktrees/$(basename "$PWD")/$(printf %s "$b" | tr / -)"
+  common=$(cd "$(git rev-parse --git-common-dir)" && pwd) || exit 1
+  wt="$HOME/.herdr/worktrees/$(basename "$(dirname "$common")")/$(printf %s "$b" | tr / -)"
   git worktree add -q "$wt" "$b" >&2 || exit 1
 fi
 printf %s "$wt"`;

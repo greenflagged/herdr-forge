@@ -276,6 +276,7 @@ test("listWorktrees lists, keeps the old list on failure, and returns at once wh
   assert.ok(w.at > 0);
   await listWorktrees(w, { folder: "/repo" }, fakeH({ list: new Error("away") }));
   assert.equal(w.list.length, 1, "a machine that's away too");
+  assert.deepEqual([w.folder, w.machine], ["/repo", "mac"], "and where it was listed");
   // A second call while one runs returns at once without its own git.
   let release;
   const slow = fakeH({ list: () => new Promise((r) => { release = () => r({ stdout: "" }); }) });
@@ -302,6 +303,12 @@ test("seedChecks and claimChecks: seeded yes, nothing without a check or while r
   assert.deepEqual(due.map((m) => m.merge_sha), ["m9"]);
   assert.equal(fresh.checking, true);
   assert.deepEqual(claimChecks([merged({ merge_sha: "m10" })], flux, fresh, now), [], "not while a run is going");
+  // A tick seeds only what it hasn't seen; seedChecks (at refresh) is what overwrites.
+  const seen = checkState();
+  const no = { state: "no", text: null, at: now };
+  seen.checks.set("m7", no);
+  claimChecks([merged({ deployed: { at_ms: 1 } })], flux, seen, now);
+  assert.equal(seen.checks.get("m7"), no, "the entry it had is left alone");
   assert.equal(DEPLOY_EVERY, 60000);
 });
 

@@ -373,6 +373,15 @@ class GitHub(unittest.TestCase):
                          [(2, "eng[bot]", "new[2J"), (1, "di", "old"), (None, None, "ghost")])
         self.assertFalse(out["partial"])
 
+    def test_whoami_names_the_logged_in_account_like_note_authors(self):
+        self.routes([[r"api --hostname github.com user$", {"out": {"id": 4, "login": "di", "name": "Di"}}],
+                     [r"comments\(last", repo(issue={"comments": {"nodes": [
+                         {"databaseId": 1, "author": {"__typename": "User", "login": "di"}, "body": "x", "createdAt": iso(NOW)}]}})]])
+        out = self.run_forge("whoami", *P, 60, 0)
+        self.assertEqual((out["user"], out["error"]), ("di", None))
+        self.assertEqual(out["user"], self.run_forge("issue-notes", *P, 7, 60, 0, 3)["notes"][0]["author"])
+        self.assertTrue(any(c == "api --hostname github.com user" for c in self.calls()))
+
     def test_issue_notes_of_a_missing_issue_are_empty(self):
         self.routes([[r"comments\(last", {"out": {"data": {"repository": {"issue": None}}, "errors": [
             {"type": "NOT_FOUND", "path": ["repository", "issue"], "message": "Could not resolve to an Issue with the number of 99."}]},

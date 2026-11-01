@@ -128,6 +128,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `milestone-items P <title> <maxAge> <force>` | `{items: [MilestoneItem], at, error}` |
 | `milestone-issues P <title> <maxAge> <force>` | `{issues: [MilestoneIssue], total, partial, links: {closes, closes_reason, requests, merged}, at, error}`: the milestone's issues with the requests that close them (below) |
 | `issue-notes P <iid> <maxAge> <force> [n]` | `{notes: [Note], partial, at, error}`: the newest `n` comments (default 20, at most 100), newest first, system notes left out (below) |
+| `whoami P <maxAge> <force>` | `{user, at, error}`: the account the forge's CLI is logged in as on this host (GitLab `username`, GitHub `login`), the same name `Note.author` gives its comments; `user` null until one fetch succeeds |
 | `velocity P <maxAge> <force> <12w\|30d> <nowMs> <tz>` | `{n, size, start, edges, at, error, rows: [Row]}` with row keys `merged`, `closed`, `cycle` |
 | `commits <top> <ref> <12w\|30d> <nowMs> <tz> <force> [quick]` | `{n, size, start, edges, at, fetched, error, row: Row, total}`: run on the repo's machine. No maxAge: it re-reads git every 5 min and fetches an `origin/*` ref every 15; an empty ref means HEAD. `quick` 1: answer from the cache without git (a local `git log` when nothing is cached, never a fetch), for a panel's first draw |
 | `sync P <since> <force>` | `{now, last_sync, error, changed, more, triage_at, triage_run}`: `changed` counts issues written after `since` (an issue the forge sends again unchanged isn't rewritten) |
@@ -444,7 +445,7 @@ Neither module imports from Herdr: Herdr's functions come in as `h`, and no `cx`
 - `shownMerged(merged, ownersOfReq, now, leftoversOfReq)`: the merged requests worth a row.
   `leftoversOf(m, worktrees.list)`: the worktrees still on `m`'s branch.
 - `worktreeState() -> { list, at, folder, machine, pending }`;
-  `worktreesDue(w, merged, now?) -> bool`; `async listWorktrees(w, { folder, on }, h)`: one
+  `worktreesDue(w, merged, now?) -> bool` (not a claim); `async listWorktrees(w, { folder, on }, h)`: one
   `git worktree list` in the checkout; returns at once while one runs; never rejects.
 - `checkState() -> { checks: Map<mergeSha, { state, text, at }>, checking }`.
   `seedChecks(merged, cs)`: marks the ones forge.py already says deployed.
@@ -468,10 +469,11 @@ What a consumer must do (the modules can't check these):
 
 1. Keep one `lookState()`, `checkState()` and `worktreeState()` per view and pass the same
    ones everywhere; never reset `looking`, `checking` or `pending` yourself.
-2. Per tick, before any `cx.spawn`: `claimLooks` (skip it when nothing is on screen),
-   `worktreesDue` then `listWorktrees`, `claimChecks` then `checkDeploys`. Spawn only on a
-   non-empty claim. A non-empty claim must be handed to exactly one `lookAt` /
-   `checkDeploys` call, even if you then bail (passing `[]` releases it).
+2. Per tick, before any `cx.spawn`: `claimLooks` then `lookAt` (skip it when nothing is
+   on screen), `claimChecks` then `checkDeploys`: spawn only on a non-empty claim, and
+   hand a non-empty claim to exactly one `lookAt` / `checkDeploys` call, even if you then
+   bail (passing `[]` releases it). `worktreesDue` is not a claim, only a yes or no:
+   spawn `listWorktrees` on a yes; the listing marks itself running (`pending`) once it starts.
 3. Call `seedChecks(merged, cs)` right after storing a new merged list, so the next render
    already shows "Deployed" (`claimChecks` seeds too, so a missed call costs one render).
 4. Pass `h.notify` to `checkDeploys` for the "Deployed" notification, and `onEach` to redraw.

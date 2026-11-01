@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  actionList, checkoutOf, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, packScript, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf,
+  actionList, checkoutOf, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, packScript, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf, WORKTREE,
 } from "../shared/lib.js";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { hasGit } from "./fixtures.js";
 
 test("projectOf defaults to GitLab and infers the provider from the host", () => {
   assert.equal(projectOf({ repo: "a/b" }).host, "gitlab.com");
@@ -132,6 +137,31 @@ test("runAction starts worktree actions in the request's checkout", async () => 
   assert.equal(h.calls.length, n, "nothing ran");
 });
 
+test("WORKTREE names the new worktree after the main checkout, wherever it runs", { skip: !hasGit }, () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "forge-wt-")));
+  const env = { ...process.env, HOME: dir, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const git = (cwd, ...a) => execFileSync("git", a, { cwd, env, encoding: "utf8" }).trim();
+  const run = (cwd, b) => spawnSync("sh", ["-c", WORKTREE, "sh", b], { cwd, env, encoding: "utf8" });
+  try {
+    const origin = join(dir, "origin"), shop = join(dir, "shop");
+    git(dir, "init", "-q", "-b", "main", origin);
+    git(origin, "commit", "-q", "--allow-empty", "-m", "one");
+    for (const b of ["feat/a", "feat/b"]) git(origin, "branch", b);
+    git(dir, "clone", "-q", origin, shop);
+    let r = run(shop, "feat/a");
+    assert.equal(r.status, 0, r.stderr);
+    const a = join(dir, ".herdr/worktrees/shop/feat-a");
+    assert.equal(r.stdout, a, "from the main checkout: under its folder name");
+    r = run(a, "feat/b");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, join(dir, ".herdr/worktrees/shop/feat-b"), "from inside a worktree: still the main checkout's name");
+    assert.equal(run(a, "feat/a").stdout, a, "an existing worktree is found, not made again");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("checkoutOf matches the repo's folder name exactly", () => {
   const spaces = [
     { machine: null, folder: "/home/me/src/other-shop" },
@@ -250,6 +280,25 @@ test("sync copies agents.js and cleanup.js only into the mods that import them",
   assert.ok(!out.has("mods/forge-ci/agents.js"));
   assert.ok(!out.has("mods/forge-ci/cleanup.js"));
   assert.ok(out.has("mods/forge-ci/lib.js"), "lib.js still goes everywhere");
+});
+
+test("a stray agents.js in a mod that doesn't import it: --check names it, sync deletes it", async () => {
+  const { cpSync, existsSync, writeFileSync } = await import("node:fs");
+  const { stale, sync } = await import("../scripts/sync.mjs");
+  const base = mkdtempSync(join(tmpdir(), "forge-sync-"));
+  try {
+    const here = new URL("..", import.meta.url).pathname;
+    for (const d of ["shared", "mods", "package.json"]) cpSync(join(here, d), join(base, d), { recursive: true });
+    assert.deepEqual(stale(base), []);
+    writeFileSync(join(base, "mods/forge-ci/agents.js"), "// stray\n");
+    assert.deepEqual(stale(base), ["mods/forge-ci/agents.js (not imported there: sync deletes it)"]);
+    sync(base);
+    assert.ok(!existsSync(join(base, "mods/forge-ci/agents.js")));
+    assert.ok(existsSync(join(base, "mods/forge-requests/agents.js")), "an imported copy stays");
+    assert.deepEqual(stale(base), []);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test("findBlocks and collapse sizes", () => {

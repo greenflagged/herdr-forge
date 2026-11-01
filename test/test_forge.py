@@ -588,6 +588,26 @@ class Forge(unittest.TestCase):
         out = self.run_forge("issue-notes", *P, 1, 60, 0, 5, HERDR_FORGE_BUDGET="0")
         self.assertEqual((out["notes"], out["partial"]), ([], True))
 
+    def test_whoami_names_the_logged_in_account_like_note_authors(self):
+        self.routes([[r"api --hostname gitlab.com user$", {"out": {"id": 3, "username": "ann", "name": "Ann"}}],
+                     [r"notes\?sort=desc", {"out": [{"id": 1, "author": {"username": "ann"}, "body": "hi", "created_at": iso(NOW)}]}]])
+        out = self.run_forge("whoami", *P, 60, 0)
+        self.assertEqual((out["user"], out["error"]), ("ann", None))
+        self.assertEqual(out["user"], self.run_forge("issue-notes", *P, 1, 60, 0, 5)["notes"][0]["author"])
+        n = len(self.calls())
+        self.run_forge("whoami", *P, 60, 0)
+        self.assertEqual(len(self.calls()), n, "cached")
+        self.routes([[r"user$", {"err": "401 Unauthorized"}]])
+        out = self.run_forge("whoami", *P, 60, 1)
+        self.assertEqual(out["user"], "ann", "a failed fetch keeps the last answer")
+        self.assertIn("401", out["error"])
+        fresh = os.path.join(self.home, "fresh")
+        os.makedirs(fresh)
+        self.routes([[r"user$", {"out": {"id": 3}}]])
+        out = self.run_forge("whoami", *P, 60, 0, HOME=fresh)
+        self.assertIsNone(out["user"])
+        self.assertIn("who is logged in", out["error"])
+
     # -- issues --
 
     def sync_issues(self, issues, labels=()):

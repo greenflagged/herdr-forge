@@ -172,8 +172,8 @@ export const CLEAN_WORKTREE = `wt=$1 br=$2 head=$3
 [ -z "$head" ] || [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] || { echo "$wt has commits that weren't merged"; exit 3; }
 main=$(git -C "$wt" worktree list --porcelain | sed -n '1s/^worktree //p')
 [ -n "$main" ] || { echo "can't find the main checkout of $wt"; exit 3; }
-git -C "$main" worktree remove "$wt" 2>&1 || exit 4
-git -C "$main" branch -D "$br" >/dev/null 2>&1 || { echo "removed $wt; couldn't delete branch $br"; exit 5; }
+git -C "$main" worktree remove -- "$wt" 2>&1 || exit 4
+git -C "$main" branch -D -- "$br" >/dev/null 2>&1 || { echo "removed $wt; couldn't delete branch $br"; exit 5; }
 echo "removed $wt and $br"`;
 
 export const emptyPlan = (plan) => !plan.tabs.length && !plan.kills.length && !plan.worktrees.length;
@@ -181,7 +181,8 @@ export const emptyPlan = (plan) => !plan.tabs.length && !plan.kills.length && !p
 // ---- the flows: what a view calls each tick and from its Clean up button ----
 // Each takes a state object made here (keep one per view, never reset its flag yourself)
 // and Herdr's functions as `h`. Claims are cheap and run before any spawn (Herdr runs mod
-// code on its main thread); the async parts never reject, so a busy flag always clears.
+// code on its main thread). The ones that hold a busy flag (listWorktrees, checkDeploys)
+// never reject, so it always clears; planCleanup holds none and may reject: catch it.
 
 export const DEPLOY_EVERY = 60 * 1000;         // a deploy check that said "not yet" runs again after this
 export const WORKTREES_EVERY = 2 * 60 * 1000;  // the checkout's worktrees, for ones merged work left behind
@@ -192,8 +193,8 @@ export function worktreeState() {
   return { list: [], at: 0, folder: null, machine: null, pending: null };
 }
 
-// Whether to list them on this tick: not while a listing runs, only while merged
-// requests are shown, every couple of minutes.
+// Whether to list them on this tick: not while a listing runs, only while there are
+// merged requests (`merged`: whatever list the caller passes), every couple of minutes.
 export function worktreesDue(w, merged, now = Date.now(), every = WORKTREES_EVERY) {
   return !w.pending && (merged?.length ?? 0) > 0 && now - w.at >= every;
 }
@@ -238,7 +239,8 @@ export function seedChecks(merged, cs) {
 // claim marks the run going: hand it to exactly one checkDeploys (checkDeploys([]) releases it).
 export function claimChecks(merged, deploy, cs, now = Date.now(), every = DEPLOY_EVERY) {
   if (!deploy?.check || cs.checking) return [];
-  seedChecks(merged, cs);
+  // Seeds only what it hasn't seen, so a tick doesn't rewrite every shown request's entry.
+  seedChecks((merged ?? []).filter((m) => !cs.checks.has(m.merge_sha)), cs);
   const due = (merged ?? []).filter((m) => checkDue(m, deploy, cs.checks, now, every));
   if (due.length) cs.checking = true;
   return due;
