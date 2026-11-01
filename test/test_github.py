@@ -210,6 +210,14 @@ class GitHub(unittest.TestCase):
         self.assertEqual(len(out["jobs"]), 5, "a run listed twice gives its jobs once")
         self.assertFalse(any(c.endswith("actions/runners/1") for c in self.calls()), "details came with the list")
 
+    def test_runners_cant_be_paused(self):
+        self.routes([[r"actions/runners\?", {"out": {"runners": [{"id": 1, "name": "mac", "status": "online", "labels": []}]}}],
+                     [r"actions/runs\?", {"out": {"workflow_runs": []}}]])
+        self.run_forge("runners", *P, 600, 0)
+        n = len(self.calls())
+        self.assertIn("can't pause", self.run_forge("runner-act", *P, 1, "pause")["error"])
+        self.assertEqual(len(self.calls()), n, "nothing sent to GitHub")
+
     def test_runners_without_admin_rights_flag_nothing_stuck(self):
         self.routes([[r"actions/runners", {"err": "gh: Resource not accessible by integration (HTTP 403)"}],
                      [r"runs\?status=in_progress", {"out": {"workflow_runs": []}}],

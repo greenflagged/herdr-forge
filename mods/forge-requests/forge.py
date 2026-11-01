@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.1+e760a2f75f09"
+VERSION = "0.1.1+61d9af3e8127"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -507,6 +507,9 @@ class GitLab(Cli):
             "status": r.get("status"), "paused": bool(r.get("paused")),
             "url": f"{self.url}/-/runners/{r['id']}",
         } for r in self.api(f"{self.project}/runners?type=project_type&per_page=50")]
+
+    def runner_pause(self, rid, paused):
+        self.api(f"runners/{rid}", "PUT", {"paused": "true" if paused else "false"})
 
     def runner_details(self, rid):
         d = self.api(f"runners/{rid}")
@@ -999,6 +1002,10 @@ class GitHub(Cli):
             out.append({"id": r["id"], "name": r.get("name") or f"#{r['id']}", "status": r.get("status"),
                         "paused": False, "url": f"{self.url}/settings/actions/runners/{r['id']}"})
         return out
+
+    def runner_pause(self, rid, paused):
+        # GitHub has no pause for self-hosted runners, in its API or its website.
+        raise RuntimeError("GitHub can't pause runners: stop the runner's service, or remove it.")
 
     def runner_details(self, rid):
         return self._labels.get(rid) or self.runner_info(self.api(f"{self.repo}/actions/runners/{rid}"))
@@ -1546,6 +1553,20 @@ class Project:
             raise RuntimeError(f"unknown action {what}")
         self.forge.pipeline_act(pid, what)
         self.drop("pipelines", f"jobs:{pid}", "request-ci", "ci-jobs")
+        return {"ok": True}
+
+    def runner_act(self, rid, what):
+        if what not in ("pause", "resume"):
+            raise RuntimeError(f"unknown action {what}")
+        # Only the project's own runners, as last listed: never a shared one by a stray id.
+        listed = self.peek("runners")
+        if not listed or rid not in {r["id"] for r in listed[0]}:
+            raise RuntimeError(f"runner #{rid} isn't one of this project's")
+        self.forge.runner_pause(rid, what == "pause")
+        # Keep the list (so the next pause or resume still knows the runner), with the new
+        # state, but stale: the next read fetches it.
+        runners = [{**r, "paused": what == "pause"} if r["id"] == rid else r for r in listed[0]]
+        self.write("UPDATE cache SET at=0, json=? WHERE k=?", (json.dumps(runners), self.key("runners")))
         return {"ok": True}
 
     def runners(self, max_age, force):
@@ -2218,6 +2239,7 @@ def main(argv):
         "jobs": lambda: p.jobs(int(a[0]), age(1), force(2)),
         "pipeline-act": lambda: p.pipeline_act(int(a[0]), a[1]),
         "runners": lambda: p.runners(age(0), force(1)),
+        "runner-act": lambda: p.runner_act(int(a[0]), a[1]),
         "milestones": lambda: p.milestones(age(0), force(1)),
         "milestone-items": lambda: p.milestone_items(a[0], age(1), force(2)),
         "milestone-issues": lambda: p.milestone_issues(a[0], age(1), force(2)),
