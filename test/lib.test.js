@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  actionList, checkoutOf, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, packScript, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf, WORKTREE,
+  actionList, checkoutOf, collapseMode, expandedSize, findBlocks, isCollapsed, ago, clock, fill, forgeClient, isShown, issueItem, matches, packScript, parseRemote, projectOf, providerForHost, requestItem, runAction, span, versionOf, WORKTREE,
 } from "../shared/lib.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -367,4 +367,21 @@ test("findBlocks and collapse sizes", () => {
   assert.deepEqual(expandedSize({ px: 200 }), { px: 200 });
   assert.deepEqual(expandedSize({ px: 34 }), { weight: 1 }, "never 'expand' to the collapsed size");
   assert.deepEqual(expandedSize(null), { weight: 1 });
+});
+
+test("collapseMode: a strip when it fits, else hidden behind its toggle bar, else none", () => {
+  const tree = { type: "row", children: [
+    { id: "main", type: "block", content: { mod: "pane" } },
+    { id: "runners", type: "block", min: 220, content: { mod: "forge-runners" } },
+    { id: "ci", type: "block", min: 220, content: { mod: "forge-ci" } },
+    { id: "ms", type: "block", content: { mod: "forge-milestones" } },
+    { type: "column", children: [{ id: "t", type: "block", content: { mod: "forge-toggle", props: { target: "runners" } } }] },
+  ] };
+  const block = (mod) => findBlocks(tree, mod)[0];
+  assert.equal(block("forge-runners").min, 220);
+  assert.equal(collapseMode(block("forge-milestones"), tree), "resize", "no min: shrinks to a strip");
+  assert.equal(collapseMode(block("forge-runners"), tree), "hide", "too wide to shrink, but a toggle brings it back");
+  assert.equal(collapseMode(block("forge-ci"), tree), null, "nothing would bring it back");
+  assert.equal(collapseMode({ id: "x", parent: "floating" }, tree), null);
+  assert.equal(collapseMode(null, tree), null);
 });

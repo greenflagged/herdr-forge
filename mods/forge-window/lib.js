@@ -339,7 +339,7 @@ export function findBlocks(tree, mod, match = {}) {
     if (!n || typeof n !== "object") return;
     const c = n.content;
     if (c?.mod === mod && n.id && Object.entries(match).every(([k, v]) => v == null || c.props?.[k] === v)) {
-      out.push({ id: n.id, size: n.size ?? null, hidden: Boolean(n.hidden), parent });
+      out.push({ id: n.id, size: n.size ?? null, min: n.min ?? null, hidden: Boolean(n.hidden), parent });
     }
     for (const k of Array.isArray(n.children) ? n.children : []) walk(k, n.type ?? null);
     for (const f of Array.isArray(n.floating) ? n.floating : []) walk(f, "floating");
@@ -352,6 +352,22 @@ export function findBlocks(tree, mod, match = {}) {
 // that size is collapsed; expanding gives back the size it had (or a share of the column).
 export const HEADER_PX = 34;
 export const isCollapsed = (block) => block?.size?.px === HEADER_PX;
+// How a block's ▾ collapses it: "resize" to its header (a bar in a column, a strip in a
+// row), "hide" when its `min` won't let it shrink that far but a forge-toggle bar can bring
+// it back, or null (no ▾) when neither works.
+export function collapseMode(block, tree) {
+  if (!block || (block.parent !== "column" && block.parent !== "row")) return null;
+  if (!(block.min > HEADER_PX)) return "resize";
+  let toggled = false;
+  const walk = (n) => {
+    if (!n || typeof n !== "object" || toggled) return;
+    if (n.content?.mod === "forge-toggle" && n.content.props?.target === block.id) toggled = true;
+    for (const k of [...(Array.isArray(n.children) ? n.children : []), ...(Array.isArray(n.floating) ? n.floating : [])]) walk(k);
+  };
+  walk(tree);
+  return toggled ? "hide" : null;
+}
+
 export function expandedSize(saved) {
   if (saved && typeof saved === "object" && (saved.px > HEADER_PX || saved.weight > 0)) return saved;
   return { weight: 1 };

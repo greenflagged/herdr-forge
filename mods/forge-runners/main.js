@@ -1,8 +1,8 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, readTextFile, appHome, props, theme, window } from "herdr";
+import { exec, readTextFile, appHome, props, theme, window, notify } from "herdr";
 import { forgeClient, projectOf, agoAt, clock, openUrl, stamp } from "./lib.js";
-import { Chrome, note, pill, staleError } from "./ui.js";
+import { Chrome, button, note, pill, staleError } from "./ui.js";
 import { pollEvery, arrange } from "./runners.js";
 
 // The project's own CI runners (not the forge's shared ones), what each is running, and
@@ -29,6 +29,8 @@ export default class Runners extends View {
     this.last = 0;
     this.shown = false;
     this.ticks = 0;
+    this.hovered = null; // runner id under the mouse: it shows Pause / Resume
+    this.acting = null;  // runner id with a pause or resume in flight
     if (!this.usable()) return;
     // Whatever is cached, however old, so the panel draws at once.
     this.refresh(cx, -1, false);
@@ -74,6 +76,37 @@ export default class Runners extends View {
     });
   }
 
+  // GitLab only: GitHub has no pause for self-hosted runners.
+  pausable() {
+    return this.project.provider === "gitlab";
+  }
+
+  act(r, what, cx) {
+    this.acting = r.id;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const verb = what === "pause" ? "Pause" : "Resume";
+      const name = r.name ?? `#${r.id}`;
+      const { provider, host, repo, on } = this.project;
+      let failed = null;
+      try {
+        const out = await this.forge(["runner-act", provider, host, repo, r.id, what], { on });
+        failed = out.error ?? null;
+      } catch (e) {
+        failed = message(e);
+      }
+      this.error = failed ? `${verb} failed: ${failed}` : null;
+      try {
+        notify(failed ? { title: `${verb} failed`, body: `${name}\n${failed}`, level: "error" }
+          : { title: what === "pause" ? "Paused" : "Resumed", body: name, level: "success" });
+      } catch {}
+      this.acting = null;
+      // runner-act dropped the cached list: this fetches it again.
+      this.refresh(cx, 0, false);
+      cx.notify();
+    });
+  }
+
   jobRow(t, j, now, extra) {
     const { terms } = this.project;
     const since = j.status === "running" ? j.started_ms : j.created_ms;
@@ -101,14 +134,26 @@ export default class Runners extends View {
       ? `#${r.id} · ${kind} ${r.version ?? "?"} · ${r.platform ?? ""}/${r.arch ?? ""}` +
         (seen ? ` · last seen ${seen}` : "")
       : `#${r.id}`;
+    const acting = this.acting === r.id;
+    const actions = this.pausable() && this.hovered === r.id && !acting;
     return v_flex().id(`runner-${r.id}`).px(8).py(6).gap(3).rounded(6).cursor_pointer()
       .hover((s) => s.bg(t.hover))
+      .on_hover((on, cx) => {
+        if (on) this.hovered = r.id; else if (this.hovered === r.id) this.hovered = null;
+        cx.notify();
+      })
       .tooltip(tip)
       .on_click(() => openUrl(exec, r.url))
       .child(h_flex().gap(7).items_center()
         .child(mark)
         .child(div().flex_1().min_w(0).truncate().text_size(13).child(r.name ?? `#${r.id}`))
-        .child(div().flex_none().text_size(11).text_color(color).child(state)))
+        .when(acting, (e) => e.child(div().flex_none().text_size(11).text_color(t.muted).child("Working…")))
+        .when(actions, (e) => e.child(r.paused
+          ? button(t, `resume-${r.id}`, "Resume", (cx) => this.act(r, "resume", cx),
+            { tone: "primary", tooltip: "Let this runner pick up jobs again" })
+          : button(t, `pause-${r.id}`, "Pause", (cx) => this.act(r, "pause", cx),
+            { tooltip: busy ? "Stop it picking up new jobs: the ones running now finish" : "Stop it picking up jobs" })))
+        .when(!acting && !actions, (e) => e.child(div().flex_none().text_size(11).text_color(color).child(state))))
       .when(Boolean(r.tags?.length), (e) => e.child(h_flex().pl(15).gap(4).flex_wrap()
         .children(r.tags.map((tag) => pill(t, tag)))))
       .when(busy, (e) => e.child(v_flex().pl(11).children(r.jobs.map((j) => this.jobRow(t, j, now)))));

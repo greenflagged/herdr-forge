@@ -6,7 +6,7 @@
 import { div } from "gpui-kit";
 import { h_flex, v_flex, Popover } from "gpui-base";
 import { closeOverlay, layout, openOverlay, panes, props, run, setShared, shared, spaces } from "herdr";
-import { HEADER_PX, ago, agoAt, expandedSize, findBlocks, isCollapsed, isShown } from "./lib.js";
+import { HEADER_PX, ago, agoAt, collapseMode, expandedSize, findBlocks, isCollapsed, isShown } from "./lib.js";
 
 export { HEADER_PX };
 const SIZES = "forge.sizes"; // shared: block id -> its size before collapsing
@@ -53,9 +53,12 @@ export class Chrome {
     return blocks.find((b) => !b.hidden) ?? blocks.find((b) => b.id === p.dockTo) ?? null;
   }
 
+  collapseMode() {
+    return this.where() === "block" ? collapseMode(this.block(), layout()) : null;
+  }
+
   canCollapse() {
-    const b = this.where() === "block" ? this.block() : null;
-    return Boolean(b && (b.parent === "column" || b.parent === "row"));
+    return this.collapseMode() != null;
   }
 
   // Collapsed in a row: a strip on its edge rather than a bar.
@@ -77,8 +80,10 @@ export class Chrome {
   }
 
   toggleCollapse(cx) {
-    const b = this.block();
-    if (!b || !this.canCollapse()) return;
+    const b = this.block(), mode = this.collapseMode();
+    if (!b || !mode) return;
+    // Too wide a `min` to shrink to its header: hide it; its toggle bar shows it again.
+    if (mode === "hide" && !isCollapsed(b)) { run("layout.hide", { id: b.id }); cx.notify(); return; }
     const sizes = { ...(shared(SIZES) ?? {}) };
     if (isCollapsed(b)) {
       run("layout.resize", { id: b.id, ...expandedSize(sizes[b.id]) });

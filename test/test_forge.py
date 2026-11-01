@@ -275,6 +275,23 @@ class Forge(unittest.TestCase):
         self.assertTrue(jobs[12]["elsewhere"])
         self.assertEqual(out["runners"][0]["tags"], ["macos"])
 
+    def test_runner_act_pauses_only_the_projects_runners(self):
+        self.routes([[r"runners\?type=project_type", {"out": [{"id": 1, "description": "mac", "status": "online", "paused": False}]}],
+                     [r"runners/1$", {"out": {"tag_list": [], "run_untagged": True}}],
+                     [r"jobs\?scope", {"out": []}],
+                     [r"-X PUT .*runners/1$", {"out": {}}]])
+        self.assertIn("isn't one of this project's", self.run_forge("runner-act", *P, 1, "pause")["error"], "nothing listed yet")
+        self.run_forge("runners", *P, 600, 0)
+        self.assertTrue(self.run_forge("runner-act", *P, 1, "pause")["ok"])
+        self.assertIn("paused=true", self.calls()[-1])
+        self.assertTrue(self.run_forge("runner-act", *P, 1, "resume")["ok"], "still known after a pause")
+        self.assertIn("paused=false", self.calls()[-1])
+        n = len(self.calls())
+        self.run_forge("runners", *P, 600, 0)
+        self.assertGreater(len(self.calls()), n, "the write made the cached list stale")
+        self.assertIn("isn't one of this project's", self.run_forge("runner-act", *P, 99, "pause")["error"])
+        self.assertIn("unknown action", self.run_forge("runner-act", *P, 1, "delete")["error"])
+
     # -- velocity --
 
     def test_velocity_buckets(self):

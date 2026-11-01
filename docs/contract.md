@@ -124,6 +124,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `jobs P <pipelineId> <maxAge> <force>` | `{jobs: [Job], at, error}` |
 | `pipeline-act P <pipelineId> retry\|cancel` | `{ok}` |
 | `runners P <maxAge> <force>` | `{runners: [Runner], jobs: [CiJob], at, error}` |
+| `runner-act P <runnerId> pause\|resume` | `{ok}`: GitLab only, and only a runner the last `runners` listed; GitHub has no pause and answers an error |
 | `milestones P <maxAge> <force>` | `{milestones: [Milestone], at, error}` |
 | `milestone-items P <title> <maxAge> <force>` | `{items: [MilestoneItem], at, error}` |
 | `milestone-issues P <title> <maxAge> <force>` | `{issues: [MilestoneIssue], total, partial, links: {closes, closes_reason, requests, merged}, at, error}`: the milestone's issues with the requests that close them (below) |
@@ -146,9 +147,9 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `skill <status\|install> <name> <text> [replace]` | `{installed, current, older, foreign, version, path}`: `foreign` is a same-named skill that didn't come from herdr-forge (its first line after the frontmatter isn't `<!-- Shipped with herdr-forge X.Y.Z`); install leaves it alone unless given `replace` |
 | `version` | `{version, shapes}` |
 
-Writes (`merge`, `pipeline-act`, `update`, `comment`, triage ones) answer `{error}` instead
+Writes (`merge`, `pipeline-act`, `runner-act`, `update`, `comment`, triage ones) answer `{error}` instead
 when they fail; nothing is cached for them. Writes drop the cached answers they change: `merge` drops requests, merged, order, CI and velocity;
-`pipeline-act` drops CI and runners' jobs; `update` drops milestones (`milestone-issues`
+`pipeline-act` drops CI and runners' jobs; `runner-act` marks runners stale (keeping the list, with the new `paused`); `update` drops milestones (`milestone-issues`
 too) and velocity; `comment` drops the issue's `issue-notes`. Whatever drops `milestone-items`
 drops `milestone-issues` too.
 Velocity isn't a cached answer: dropping it sets `velocity_at` to 0, so its next read fetches.

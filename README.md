@@ -32,7 +32,7 @@ Panels there work the same way.
   for its buttons (below).
 - **Pipelines:** the last 20. Click one for its jobs by stage; hover for Retry, Cancel and ↗.
 - **Runners:** the project's own runners, what each is running, and queued jobs, flagged red when no
-  online runner has their tags.
+  online runner has their tags. On GitLab, hover a runner to pause or resume it.
 - **Milestones:** progress for each active milestone, soonest due first. Click one for its issues.
 - **Velocity:** commits, merged MRs, closed issues and MR cycle time over 12 weeks or 30 days, against
   your average week. Days run midnight to midnight in your time zone.
@@ -200,7 +200,8 @@ The panels work the same way; a few things follow from how GitHub works:
 - **Runners** lists the self-hosted runners registered on the repository (not the organisation's),
   and needs admin rights to the repository; without them the panel says so. Queued jobs show as
   stuck only when they ask for `self-hosted`, the repository has runners, and none of them has the
-  job's labels. Jobs on GitHub's own runners show as running elsewhere.
+  job's labels. Jobs on GitHub's own runners show as running elsewhere. GitHub can't pause a
+  runner, so there's no Pause button.
 - **Scoped labels:** GitHub has none, so Forge reads `priority: high` as scope `priority`, value
   `high`. Set the issue browser's `scopeSep` prop if yours differ.
 - **Issues:** weight and blocking counts are GitLab-only. Linked PRs are the ones that close the
