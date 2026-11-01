@@ -531,8 +531,18 @@ class Forge(unittest.TestCase):
         n = len(self.calls())
         self.run_forge("milestone-issues", *P, "v1", 30, 0, HERDR_FORGE_BUDGET="0")
         self.assertEqual(len(self.calls()) - n, 2)
-        # An hour from the original fetch, the next walk's partial answer replaces it.
+        # Past `until`, the keep no longer gates maxAge, though it was tried just now:
+        # the next poll walks again, and (an hour not yet up) keeps again.
+        db.execute("UPDATE meta SET v = json_set(v, '$.until', json_extract(v, '$.tried') - 1) WHERE k LIKE 'kept:%'")
+        db.commit()
+        n = len(self.calls())
+        out = self.run_forge("milestone-issues", *P, "v1", 30, 0, HERDR_FORGE_BUDGET="0")
+        self.assertEqual(len(self.calls()) - n, 2, "`until` passed: maxAge counts from `at` again")
+        self.assertEqual((out["partial"], len(out["issues"])), (False, 101))
+        # An hour on (every timestamp moved back together), the next walk's partial answer replaces it.
         db.execute("UPDATE cache SET at = at - 3600 WHERE k LIKE 'milestone-issues%'")
+        db.execute("UPDATE meta SET v = json_set(v, '$.of', json_extract(v, '$.of') - 3600, '$.tried', json_extract(v, '$.tried') - 3600,"
+                   " '$.until', json_extract(v, '$.until') - 3600) WHERE k LIKE 'kept:%'")
         db.commit()
         out = self.run_forge("milestone-issues", *P, "v1", 30, 0, HERDR_FORGE_BUDGET="0")
         self.assertEqual((out["partial"], len(out["issues"])), (True, 100))

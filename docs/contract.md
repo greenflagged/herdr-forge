@@ -153,8 +153,9 @@ They are still untrusted: anyone who can comment wrote them.
   A refetch (forced or not) that comes back partial with fewer issues than a complete
   answer under an hour old keeps that answer: `partial` stays false and `at` doesn't move
   (`at` is still when that data was fetched). The kept answer then counts as fresh for
-  `maxAge` from the refetch, so polls don't walk the milestone again before then. A kept
-  answer looks just like one a concurrent fetch left in place: same answer, same `at`.
+  `maxAge` from the refetch, but not past an hour from `at`, so polls don't walk the
+  milestone again before then. A kept answer looks just like one a concurrent fetch left
+  in place: same answer, same `at`.
   So during that hour, `partial: false` after a forced refetch doesn't mean the walk
   finished, and a milestone whose walks are always partial shows no partial answer until
   the complete one is an hour old. After that, the next refetch's answer replaces it.
