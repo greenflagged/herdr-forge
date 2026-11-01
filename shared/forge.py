@@ -60,6 +60,10 @@ class Busy(RuntimeError):
     """The forge rate-limited us; we're waiting before asking again."""
 
 
+class Keep(Exception):
+    """Raised by a `cached` fetch: keep the cached answer, as it is, over what came back."""
+
+
 class NoCli(RuntimeError):
     """The forge's CLI isn't installed on this machine."""
 
@@ -1055,7 +1059,7 @@ class GitHub(Cli):
       comments{totalCount} closedByPullRequestsReferences(first:20,includeClosedPrs:true){nodes{number title state
       isDraft headRefName headRefOid url mergedAt repository{nameWithOwner}}}}}}}}"""
     # A closing PR we can't see (SAML, a private fork) comes back null with an error at its path.
-    MILESTONE_ISSUES_OK = (r"\.closedByPullRequestsReferences\.nodes\.\*($|\.)", r"\.author($|\.)")
+    MILESTONE_ISSUES_OK = (r"\.closedByPullRequestsReferences\.nodes\.\*($|\.)",)
 
     def milestone_number(self, title):
         return next((m["number"] for m in self.all_pages(f"{self.repo}/milestones?state=all") if m["title"] == title), None)
@@ -1393,6 +1397,9 @@ class Project:
                 return json.loads(row[1]), row[0], None
         try:
             data = fetch()
+        except Keep:
+            self.write("UPDATE cache SET lease=0 WHERE k=?", (k,))
+            return json.loads(row[1]), row[0], None
         except FETCH_ERRORS as e:
             self.nocli = self.nocli or isinstance(e, NoCli)
             if row:
@@ -1575,7 +1582,15 @@ class Project:
     def milestone_issues(self, title, max_age, force):
         """The milestone's issues with the requests that close them (the forge's links) and,
         from the cached `requests` / `merged` answers, those whose branch names the issue."""
-        data, at, err = self.cached(f"milestone-issues:{title}", max_age, lambda: self.forge.milestone_issues(title),
+        def fetch():
+            new, old = self.forge.milestone_issues(title), self.peek(f"milestone-issues:{title}")
+            # A walk cut short (seen live: 388 issues, then 100) doesn't replace a complete
+            # answer under an hour old.
+            if new["partial"] and old and not old[0]["partial"] and time.time() - old[1] < PEEK_MAX_AGE \
+                    and len(new["issues"]) < len(old[0]["issues"]):
+                raise Keep()
+            return new
+        data, at, err = self.cached(f"milestone-issues:{title}", max_age, fetch,
                                     {"issues": [], "total": None, "partial": False, "closes": False, "closes_reason": None},
                                     force)
         issues = data["issues"]

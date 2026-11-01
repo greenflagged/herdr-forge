@@ -223,8 +223,11 @@ test("forgeClient's boot and install code runs under real python", async () => {
 
 test("forge.py stays small enough to send as one argument", async () => {
   const { statSync } = await import("node:fs");
-  // Linux caps one argument at 131,072 bytes; 120 KB leaves ~14 KB to spare. Before the next
-  // sizeable feature, compress the install payload or send it in parts (lib.js INSTALL, sync.mjs).
+  // Linux caps one argument at 131,072 bytes. What ships is the stamped mods/*/forge.py (9 bytes
+  // more than this file), sent raw as one argv entry (lib.js forgeClient, INSTALL): at this guard
+  // ~11 KB remains on a direct exec, and less if Herdr runs it through ssh / `sh -c` (quoting turns
+  // each ' into 4 bytes; unverified which transport it uses). Before the next sizeable feature,
+  // compress the install payload or send it in parts (lib.js INSTALL, sync.mjs).
   assert.ok(statSync(new URL("../shared/forge.py", import.meta.url)).size < 120_000);
 });
 

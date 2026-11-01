@@ -488,6 +488,24 @@ class Forge(unittest.TestCase):
         self.assertEqual((sum("issues?milestone" in c for c in new), sum("workItems" in c for c in new)), (5, 5))
         self.assertEqual((out["partial"], len(out["issues"]), out["total"]), (True, 499, 900))
 
+    def test_milestone_issues_keep_a_complete_answer_over_a_shorter_partial_one(self):
+        routes = [[r"issues\?milestone=.*page=1$", {"out": [issue(k) for k in range(1, 101)]}],
+                  [r"issues\?milestone=.*page=2$", {"out": [issue(101)]}],
+                  [r"workItems\(.* -f after=c1", self.wi_route([self.wi(101)], count=101)[1]],
+                  self.wi_route([self.wi(1)], more=True, cursor="c1", count=101)]
+        self.routes(routes)
+        full = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertEqual((full["partial"], len(full["issues"])), (False, 101))
+        self.routes(routes)
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((out["partial"], len(out["issues"]), out["at"], out["error"]), (False, 101, full["at"], None),
+                         "seen live: a forced refetch out of time replaced 388 issues with 100")
+        db = self.db()
+        db.execute("UPDATE cache SET at = at - 3601")
+        db.commit()
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((out["partial"], len(out["issues"])), (True, 100), "over an hour old: the partial one wins")
+
     def test_issue_notes_are_newest_first_bounded_and_cleaned(self):
         self.sync_issues([issue(1)])
         note = lambda i, body="b", system=False: {"id": i, "author": {"username": "x\x1by"}, "body": body,

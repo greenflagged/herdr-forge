@@ -150,9 +150,16 @@ They are still untrusted: anyone who can comment wrote them.
   open ones that haven't changed lately included; `total` counts all states, and some
   `requests` may be missing. Force at most once per `maxAge`: if the answer is still
   partial, that is the steady state for this milestone, so poll normally and read `total`.
+  A refetch (forced or not) that comes back partial with fewer issues than a complete
+  answer under an hour old keeps that answer: `partial` stays false and `at` doesn't move.
+- An unknown milestone title (renamed, deleted, or a typo) answers `issues: []`, `total: 0`,
+  `error: null`, the same as an empty milestone. Check the title against `milestones` to
+  tell them apart.
 - `links.closes`: the forge's own closing links are in this answer. False on a GitLab
   without the work-item development widget (checked again after 24 h): `links.closes_reason`
   then holds the server's words, `requests` hold branch matches only, and `error` stays null.
+  Also false, on either forge, when nothing has been fetched yet: the first fetch failed,
+  so `issues` is empty and `error` is set.
 - `links.requests`, `links.merged`: the `at` of the cached `requests` / `merged` answer this
   one was joined with, or null when none was used (none cached in this shape, or cached
   more than an hour ago). They are as fresh as whoever last polled them (any mod on this
@@ -278,8 +285,10 @@ mixes PRs into issues). Mods must cope with the nulls:
 - Velocity comes from search (`is:pr is:merged merged:>=...`), which stops at 1000 results.
 - GraphQL answers with some failed fields (an inaccessible cross-reference) keep what came
   back; `gh` exits 1 for them, so `run` hands back their output. `milestone-issues` and
-  `issue-notes` are stricter: only an error inside a closing PR or an author is skipped,
-  any other fails the fetch (the last good answer stays, with `error`).
+  `issue-notes` are stricter. `milestone-issues` skips only an error inside a closing PR.
+  `issue-notes` skips only an error at an author, and a NOT_FOUND at `repository.issue` (no
+  such issue), which answers `notes: []` with `error: null`. Any other error fails the fetch
+  (the last good answer stays, with `error`).
 - Scoped labels: GitHub has none; the separator is a setting (`query`'s `sep`), default
   `": "` (`priority: high`). Accepting a triage proposal adds the label, which GitHub creates
   if it's missing.

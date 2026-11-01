@@ -324,6 +324,42 @@ class GitHub(unittest.TestCase):
         self.assertIsNone(out["error"])
         self.assertEqual([r["iid"] for r in out["issues"][0]["requests"]], [5])
 
+    # What `update` asks, and the REST number lookup once it has dropped the cached milestones.
+    number_routes = [[r"-X (POST|DELETE|PATCH)", {"out": []}], [r"issue\(number:\$i\)", repo(issue=issue(1))],
+                     [r"milestones\?state=all", {"out": [{"number": 3, "title": "v1"}]}]]
+
+    def ms_page(self, nodes, total, cursor=None, after=None):
+        """One page of milestone 3's issues; `after` is the cursor that asks for it."""
+        pattern = r"milestone\(number" + (rf".* -f after={after}$" if after else r"(?!.* -f after=)")
+        page = {"title": "v1", "issues": {"totalCount": total, **conn(nodes, more=cursor is not None, cursor=cursor)}}
+        return [pattern, {"out": {"data": {"repository": {"milestone": page}}}}]
+
+    def test_milestone_issues_walk_pages_and_stop(self):
+        self.prime_milestones()
+        self.page_routes = [self.ms_page([self.mi(1)], 3, cursor="c1"), self.ms_page([self.mi(2)], 3, cursor="c2", after="c1"),
+                            self.ms_page([self.mi(3)], 3, after="c2")]
+        self.routes(self.page_routes)
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertEqual((sorted(i["iid"] for i in out["issues"]), out["total"], out["partial"]), ([1, 2, 3], 3, False))
+        # Out of time after the first page: what came back, partial.
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((sorted(i["iid"] for i in out["issues"]), out["partial"]), ([1, 2, 3], False),
+                         "a shorter partial walk keeps the complete answer")
+        self.routes(self.page_routes + self.number_routes)
+        self.run_forge("update", *P, 1, json.dumps({"milestone": None}))  # drops the cached answer
+        before = len(self.calls())
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1, HERDR_FORGE_BUDGET="0")
+        self.assertEqual(([i["iid"] for i in out["issues"]], out["total"], out["partial"]), ([1], 3, True))
+        self.assertEqual(sum("milestone(number" in c for c in self.calls()[before:]), 1)
+        # The page cap: five pages, then stop with pages left.
+        self.routes([self.ms_page([self.mi(10)], 9, cursor="c1")]
+                    + [self.ms_page([self.mi(10 + k)], 9, cursor=f"c{k + 1}", after=f"c{k}") for k in range(1, 6)]
+                    + self.number_routes)
+        before = len(self.calls())
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1)
+        self.assertEqual(sum("milestone(number" in c for c in self.calls()[before:]), 5)
+        self.assertEqual((len(out["issues"]), out["partial"]), (5, True))
+
     def test_issue_notes_come_newest_first(self):
         # Oldest first, as GraphQL lists them; a deleted account's author is null.
         self.routes([[r"comments\(last", repo(issue={"comments": {"nodes": [
@@ -388,6 +424,15 @@ class GitHub(unittest.TestCase):
         self.assertIn('{"labels": ["priority: high"]}', add)
         self.assertIn("-X DELETE repos/acme/shop/issues/1/labels/priority%3A%20low", remove)
         self.assertIn('{"milestone": null, "state": "closed"}', patch)
+
+    def test_update_drops_milestone_issues(self):
+        self.prime_milestones()
+        self.routes([self.milestone_route("v1", [self.mi(1)])])
+        self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.routes(self.number_routes + [self.milestone_route("v1", [self.mi(1), self.mi(2)])])
+        self.run_forge("update", *P, 1, json.dumps({"milestone": None}))
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertEqual([i["iid"] for i in out["issues"]], [1, 2], "refetched, not the cached answer")
 
     def test_removing_a_label_thats_already_gone_is_fine(self):
         self.sync_issues([issue(1)])
