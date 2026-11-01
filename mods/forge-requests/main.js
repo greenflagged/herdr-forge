@@ -13,7 +13,7 @@ import {
 } from "./cleanup.js";
 import {
   defaultActions, mergeTip, mergeBlocked, checkoutOf, itemOf, askText,
-  orderFacts, migrationPattern, clashText,
+  orderFacts, migrationPattern, clashText, nothingToCleanText,
 } from "./requests.js";
 
 // Open merge requests (GitLab) / pull requests (GitHub) for one project, through forge.py,
@@ -150,7 +150,7 @@ export default class ForgeRequests extends View {
         listed: shared("forge.requestAgents")?.[m.url] }, H);
       this.done(m.iid);
       if (plan.blocked) this.notice = { iid: m.iid, text: `Not yet: ${plan.blocked}.`, error: true };
-      else if (emptyPlan(plan)) this.notice = { iid: m.iid, text: "Nothing left to clean up.", error: false };
+      else if (emptyPlan(plan)) this.notice = { iid: m.iid, text: nothingToCleanText(plan), error: false };
       else this.confirming = { iid: m.iid, id: "cleanup", plan };
       cx.notify();
     });
