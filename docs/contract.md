@@ -90,6 +90,8 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
   it got and carries on from where it stopped on the next fetch, and the answer's `at`
   moves only once both are complete. `milestones` past the budget starts no more count
   calls: those milestones come with `open`, `closed`, `all` null.
+  A walking command that stops early says `partial: true` (its answer starts from page 1
+  next time) or `more: true` (it carries on next time).
 
 ### Commands
 
@@ -108,6 +110,8 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `runners P <maxAge> <force>` | `{runners: [Runner], jobs: [CiJob], at, error}` |
 | `milestones P <maxAge> <force>` | `{milestones: [Milestone], at, error}` |
 | `milestone-items P <title> <maxAge> <force>` | `{items: [MilestoneItem], at, error}` |
+| `milestone-issues P <title> <maxAge> <force>` | `{issues: [MilestoneIssue], total, partial, links: {closes, closes_reason, requests, merged}, at, error}`: the milestone's issues with the requests that close them (below) |
+| `issue-notes P <iid> <maxAge> <force> [n]` | `{notes: [Note], partial, at, error}`: the newest `n` comments (default 20, at most 100), newest first, system notes left out (below) |
 | `velocity P <maxAge> <force> <12w\|30d> <nowMs> <tz>` | `{n, size, start, edges, at, error, rows: [Row]}` with row keys `merged`, `closed`, `cycle` |
 | `commits <top> <ref> <12w\|30d> <nowMs> <tz> <force> [quick]` | `{n, size, start, edges, at, fetched, error, row: Row, total}`: run on the repo's machine. No maxAge: it re-reads git every 5 min and fetches an `origin/*` ref every 15; an empty ref means HEAD. `quick` 1: answer from the cache without git (a local `git log` when nothing is cached, never a fetch), for a panel's first draw |
 | `sync P <since> <force>` | `{now, last_sync, error, changed, more, triage_at, triage_run}`: `changed` counts issues written after `since` (an issue the forge sends again unchanged isn't rewritten) |
@@ -127,12 +131,53 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 
 Writes (`merge`, `pipeline-act`, `update`, `comment`, triage ones) answer `{error}` instead
 when they fail; nothing is cached for them. Writes drop the cached answers they change: `merge` drops requests, merged, order, CI and velocity;
-`pipeline-act` drops CI and runners' jobs; `update` drops milestones and velocity.
+`pipeline-act` drops CI and runners' jobs; `update` drops milestones (`milestone-issues`
+too) and velocity; `comment` drops the issue's `issue-notes`. Whatever drops `milestone-items`
+drops `milestone-issues` too.
 Velocity isn't a cached answer: dropping it sets `velocity_at` to 0, so its next read fetches.
 
-`show` cleans what it returns: titles, label and milestone names, assignees and authors
-are one line without control characters; descriptions and comments lose control
-characters but keep their newlines.
+`show`, `milestone-issues` and `issue-notes` clean what they return: titles, label and
+milestone names, assignees, authors and branch names are one line without control
+characters; descriptions and comments lose control characters but keep their newlines.
+They are still untrusted: anyone who can comment wrote them.
+
+#### `milestone-issues`
+
+- `issues`: up to 500, most recently updated first (open ones first in the answer).
+  `total`: how many the milestone has (the forge's count; null when it isn't known).
+- `partial`: the walk stopped before the end (time ran out, or the 5-page cap). The most
+  recently updated issues came first, so the ones missing are the least recently updated,
+  open ones that haven't changed lately included; `total` counts all states, and some
+  `requests` may be missing. Force at most once per `maxAge`: if the answer is still
+  partial, that is the steady state for this milestone, so poll normally and read `total`.
+- `links.closes`: the forge's own closing links are in this answer. False on a GitLab
+  without the work-item development widget (checked again after 24 h): `links.closes_reason`
+  then holds the server's words, `requests` hold branch matches only, and `error` stays null.
+- `links.requests`, `links.merged`: the `at` of the cached `requests` / `merged` answer this
+  one was joined with, or null when none was used (none cached in this shape, or cached
+  more than an hour ago). They are as fresh as whoever last polled them (any mod on this
+  machine) and cover what those answers hold: open requests (GitLab: the 50 most recently
+  updated) and the last 7 days of merges. A consumer that polls neither gets both null and
+  closing links only.
+
+#### `issue-notes`
+
+One call per issue; a batched form, if it comes, will be a new command. `partial`: fewer
+than `n` came back because time ran out, not because the issue has no more, so a search
+through them is inconclusive. It and `show` keep their own copies of the comments and
+refresh them by different rules, so they can disagree until both have refetched.
+
+#### Polling a milestone cheaply
+
+Poll `milestone-issues` per milestone on screen: one cached answer, one GraphQL page per
+100 issues on GitHub, one REST page plus one GraphQL page per 100 issues on GitLab, at most
+5 of each. Keep polling `requests` and `merged`: they carry CI (join by iid) and feed the
+branch matches. Fetch `issue-notes` with a long `maxAge`, forcing it when an issue's
+`updated_ms` or `notes` changed: a new comment moves both on both forges, a deleted one
+moves `notes`, an edited one moves `updated_ms` on GitLab (unverified on GitHub). So for
+issues whose comments you act on, also poll `issue-notes` with a bounded `maxAge` (10
+minutes is plenty). A `comment` through forge.py drops the issue's notes, so the next read
+refetches; `show`'s copy refetches when the issue next syncs.
 
 ### Shapes
 
@@ -162,11 +207,24 @@ CiJob      {id, name, group, status, started_ms, created_ms, tags[], runner: {id
 Milestone  {id, title, due, url, open, closed, all}                  due: "YYYY-MM-DD" | null;
            open/closed/all: null when the call ran out of time before counting it
 MilestoneItem {id, iid, title, state, assignees[], url}              open ones first
+MilestoneIssue {id, iid, title, state, labels[], assignees[], url, updated_ms, closed_ms, notes,
+            triage: {rank, priority, status, locked} | null, requests: [LinkedRequest]}
+           notes: the comment count; triage: this machine's triage row, read fresh
 Row        {key, values: [n per bucket], now, avg, unit?: "duration", lowerBetter?}
 Issue      {iid, title, state, labels[], milestone: {id, title, due} | null, assignees[], author,
             created_ms, updated_ms, closed_ms, notes, requests, weight, blocking, url}
-Note       {author, body, at_ms}
-LinkedRequest {iid, title, state, draft, source, url}
+Note       {id, author, body, at_ms}   id: the forge's comment id; may be null (a `show` row
+           cached by an older version, or a GitHub comment without a database id)
+LinkedRequest {iid, title, state, draft, source, url, sha, merged_ms, via}
+           state: opened | merged | closed. sha, merged_ms and via are filled by
+           `milestone-issues` and null on `show` rows. sha: the head commit; merged_ms: null
+           unless merged; via: "closes" is the forge's own link (the request closes the
+           issue; up to 20 per issue, the first 20 the forge lists). Any other value is
+           weaker, and more may come: treat an unknown one like "branch" (an open or
+           recently merged request whose source branch holds the issue number as its own
+           run of digits; check the title). For a request a fresher `requests` / `merged`
+           answer also holds, state, sha, draft and merged_ms are theirs (a merge always
+           wins); otherwise the milestone fetch's.
 ```
 
 `iid` is the number people see (`#12`, `!7`; issues are `#` on every forge). CI statuses use GitLab's words on every
@@ -209,9 +267,19 @@ mixes PRs into issues). Mods must cope with the nulls:
 - `Issue.weight` and `blocking` are null; `requests` counts the PRs that close the issue.
   `show`'s requests are the closing PRs plus cross-referenced and connected ones, from this
   repository only. `LinkedRequest.state` is `opened`, `merged` or `closed`.
+- `milestone-issues` finds the milestone's number in the cached `milestones` answer (open
+  milestones), else through REST (`milestones?state=all`, one page per 100 milestones): a
+  closed milestone pays that lookup on every refetch, seconds on a repository with hundreds.
+  A cached number whose milestone now has another title is looked up again. Then one
+  GraphQL call per 100 issues; closing PRs from this repository only. It assumes github.com's
+  schema (`closedByPullRequestsReferences`, `Milestone.issues(orderBy:)`): an older GitHub
+  Enterprise Server answers `error` on every poll. `issue-notes` is one GraphQL call; bot
+  authors read `name[bot]`, as REST and `show` name them.
 - Velocity comes from search (`is:pr is:merged merged:>=...`), which stops at 1000 results.
 - GraphQL answers with some failed fields (an inaccessible cross-reference) keep what came
-  back; `gh` exits 1 for them, so `run` hands back their output.
+  back; `gh` exits 1 for them, so `run` hands back their output. `milestone-issues` and
+  `issue-notes` are stricter: only an error inside a closing PR or an author is skipped,
+  any other fails the fetch (the last good answer stays, with `error`).
 - Scoped labels: GitHub has none; the separator is a setting (`query`'s `sep`), default
   `": "` (`priority: high`). Accepting a triage proposal adds the label, which GitHub creates
   if it's missing.

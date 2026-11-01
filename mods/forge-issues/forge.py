@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.0+bd63feb60af1"
+VERSION = "0.1.0+7bff3c2b924c"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -50,6 +50,8 @@ RECONCILE_EVERY = 3600          # look for deleted issues
 RUNNER_DETAILS_EVERY = 600
 CACHE_DAYS = 7                  # cached answers nobody asked for in a week are deleted
 MERGED_DAYS = 7                 # how far back `merged` looks
+MILESTONE_PAGES = 5             # pages of 100 issues `milestone-issues` walks, most recently updated first
+PEEK_MAX_AGE = 3600             # seconds a cached `requests` / `merged` answer may be joined into another
 PRIORITIES = ["blocker", "critical", "high", "medium", "low"]
 START = time.time()
 
@@ -120,6 +122,39 @@ UNTRUSTED_END = "<<<END UNTRUSTED ISSUE DATA>>>"
 def plain_text(s):
     """A description or comment: control characters gone, newlines and tabs kept."""
     return None if s is None else CONTROL.sub(lambda m: m.group() if m.group() in "\n\t" else "", str(s))
+
+
+def issue_in_branch(iid, branch):
+    """Whether a branch name holds the issue number as its own run of digits: 123-fix,
+    issue-123, feature/123; not 1.123 or v1123."""
+    return re.search(rf"(?<![0-9.]){int(iid)}(?![0-9.])", branch or "") is not None
+
+
+# GraphQL static-validation wording (graphql-ruby, which GitLab runs): an unknown field,
+# argument, type or enum value. A timeout or a permission error that merely names a field
+# isn't one.
+SCHEMA_ERROR = re.compile(r"doesn't exist on type|doesn't accept argument|No such type|can't be spread inside"
+                          r"|isn't a defined input type|has an invalid value")
+
+
+def schema_error(msg):
+    return SCHEMA_ERROR.search(msg or "") is not None
+
+
+def tolerated(err, tolerate):
+    """Whether a GraphQL error leaves the rest of a strict answer usable. `tolerate` holds
+    patterns over the error's path joined with dots, list indexes as `*`
+    (`repository.issue.comments.nodes.*.author`); a (pattern, type) pair also needs the
+    error's `type` (`NOT_FOUND`). An error without a path is never tolerated."""
+    path = err.get("path") if isinstance(err, dict) else None
+    if not path:
+        return False
+    where = ".".join("*" if isinstance(x, int) else str(x) for x in path)
+    for t in tolerate:
+        pattern, kind = t if isinstance(t, tuple) else (t, None)
+        if re.search(pattern, where) and (kind is None or err.get("type") == kind):
+            return True
+    return False
 
 
 def median(xs):
@@ -286,7 +321,9 @@ class Cli:
     def all_pages(self, path, per=100):
         return [x for batch in self.pages(path, per) for x in batch]
 
-    def gql(self, query, variables=None):
+    def gql(self, query, variables=None, strict=False, tolerate=()):
+        """strict: any GraphQL error fails the call, except those `tolerated` (see there).
+        The caller still checks that the fields it depends on came back."""
         query = " ".join(query.split())  # one line: queries are written over several
         argv = ["api", "--hostname", self.p.host, "graphql", "-f", f"query={query}"]
         for k, v in (variables or {}).items():
@@ -296,6 +333,10 @@ class Cli:
         if not isinstance(out, dict):
             raise RuntimeError("the GraphQL answer is empty")
         data = out.get("data")
+        if strict:
+            for e in out.get("errors") or []:
+                if not tolerated(e, tolerate):
+                    raise RuntimeError((e.get("message") if isinstance(e, dict) else None) or "GraphQL error")
         # Some fields failed but the rest came back: keep what came. Missing parts raise
         # KeyError/TypeError where they're read, which keep the last good answer.
         if out.get("errors") and not (isinstance(data, dict) and any(v is not None for v in data.values())):
@@ -489,6 +530,92 @@ class GitLab(Cli):
         return [{"id": i["id"], "iid": i["iid"], "title": i["title"], "state": i["state"],
                  "assignees": [a["username"] for a in i.get("assignees") or []], "url": i["web_url"]} for i in items]
 
+    # Closing links come from the work-item development widget (experimental, not on every
+    # GitLab). No `types:`: tasks and incidents in the milestone are issues to REST too.
+    WORKITEMS_Q = """query($p:ID!,$t:String!,$after:String){project(fullPath:$p){workItems(milestoneTitle:[$t],
+      sort:UPDATED_DESC,first:100,after:$after){count pageInfo{hasNextPage endCursor} nodes{iid widgets{
+      ... on WorkItemWidgetDevelopment{closingMergeRequests(first:20){nodes{mergeRequest{iid title state draft
+      sourceBranch diffHeadSha webUrl mergedAt}}}}}}}}}"""
+    # A merge request we can't see comes back null with an error at its path: skip it.
+    WORKITEMS_OK = (r"\.closingMergeRequests\.nodes\.\*\.mergeRequest($|\.)",)
+
+    def milestone_issues(self, title):
+        """The milestone's issues, most recently updated first, with the merge requests that
+        close them: REST pages and work-item pages taken in turn, so a walk cut short holds
+        the same issues on both sides."""
+        memo = self.p.meta("cap:closing_links")
+        closes, reason = True, None
+        if isinstance(memo, dict) and time.time() - (memo.get("at") or 0) < 86400:
+            closes, reason = False, memo.get("msg")
+        rest = self.pages(f"{self.project}/issues?milestone={urllib.parse.quote(title)}&state=all"
+                          "&order_by=updated_at&sort=desc")
+        issues, seen, links = [], set(), {}
+        rest_done, links_done = False, not closes
+        after, total, partial = None, None, False
+        mine = self.url + "/-/merge_requests/"
+        for i in range(MILESTONE_PAGES):
+            if not rest_done:
+                batch = next(rest)
+                for x in batch:
+                    if x["iid"] not in seen:  # offset pages over a moving order can repeat a row
+                        seen.add(x["iid"])
+                        issues.append(x)
+                rest_done = len(batch) < 100
+            if not links_done:
+                try:
+                    project = self.gql(self.WORKITEMS_Q, {"p": self.p.repo, "t": title, "after": after},
+                                       strict=True, tolerate=self.WORKITEMS_OK)["project"]
+                except Busy:
+                    raise
+                except RuntimeError as e:
+                    if i or not schema_error(str(e)):
+                        raise
+                    # This GitLab has no such widget (or field): remember it for a day.
+                    reason = str(e)[-300:]
+                    self.p.set_meta("cap:closing_links", {"at": time.time(), "msg": reason})
+                    self.p.db.commit()
+                    closes, links_done = False, True
+                    project = None
+                if not links_done:
+                    if not project:
+                        raise RuntimeError("project not found")
+                    conn = project["workItems"]
+                    if not conn or not isinstance(conn.get("nodes"), list):
+                        raise RuntimeError("the work items didn't come back")
+                    if total is None:
+                        total = conn.get("count")
+                    for n in conn["nodes"]:
+                        if not n:
+                            continue
+                        got = links.setdefault(int(n["iid"]), [])
+                        for w in n.get("widgets") or []:
+                            for c in ((w or {}).get("closingMergeRequests") or {}).get("nodes") or []:
+                                m = (c or {}).get("mergeRequest")
+                                if not m or not (m.get("webUrl") or "").startswith(mine):
+                                    continue  # no access, or another project's
+                                got.append({"iid": int(m["iid"]), "title": m.get("title"),
+                                            "state": m["state"] if m.get("state") in ("merged", "closed") else "opened",
+                                            "draft": bool(m.get("draft")), "source": m.get("sourceBranch"),
+                                            "url": m["webUrl"], "sha": m.get("diffHeadSha"),
+                                            "merged_ms": ms(m.get("mergedAt")), "via": "closes"})
+                    links_done = not conn["pageInfo"]["hasNextPage"]
+                    after = conn["pageInfo"]["endCursor"]
+            if rest_done and links_done:
+                break
+            if over_budget():
+                partial = True
+                break
+        else:
+            partial = True  # the page cap, with pages left
+        out = [{"id": x["id"], "iid": x["iid"], "title": x["title"], "state": x["state"],
+                "labels": x.get("labels") or [], "assignees": [a["username"] for a in x.get("assignees") or []],
+                "url": x["web_url"], "updated_ms": ms(x.get("updated_at")), "closed_ms": ms(x.get("closed_at")),
+                "notes": x.get("user_notes_count", 0), "requests": links.get(x["iid"], [])} for x in issues]
+        out.sort(key=lambda x: (x["state"] != "opened", -(x["updated_ms"] or 0)))
+        if total is None and not partial:
+            total = len(out)
+        return {"issues": out, "total": total, "partial": partial, "closes": closes, "closes_reason": reason}
+
     # -- velocity --
 
     MR_Q = ("query($p:ID!,$t:Time,$after:String){project(fullPath:$p){mergeRequests(state:merged,mergedAfter:$t,"
@@ -570,11 +697,29 @@ class GitLab(Cli):
         return [{"id": m["id"], "title": m["title"], "due": m.get("due_date")}
                 for m in self.all_pages(f"{self.project}/milestones?state=active")]
 
+    def issue_notes(self, iid, limit=None):
+        """(notes, partial): without a limit every comment, oldest first; with one the
+        newest `limit`, newest first. System notes (label changes and the like) aren't comments."""
+        note = lambda n: {"id": n.get("id"), "author": (n.get("author") or {}).get("username"),
+                          "body": n.get("body") or "", "at_ms": ms(n.get("created_at"))}
+        if limit is None:
+            return [note(n) for n in self.all_pages(f"{self.project}/issues/{iid}/notes?sort=asc")
+                    if not n.get("system")], False
+        kept, partial = [], False
+        for batch in self.pages(f"{self.project}/issues/{iid}/notes?sort=desc&order_by=created_at"):
+            kept += [note(n) for n in batch if not n.get("system")]
+            if len(kept) >= limit or len(batch) < 100:
+                break
+            if over_budget():
+                partial = True
+                break
+        return kept[:limit], partial
+
     def issue_detail(self, iid):
-        notes = [n for n in self.all_pages(f"{self.project}/issues/{iid}/notes?sort=asc") if not n.get("system")]
+        notes = self.issue_notes(iid)[0]
         mrs = self.api(f"{self.project}/issues/{iid}/related_merge_requests?per_page=50")
         return {
-            "notes": [{"author": n["author"]["username"], "body": n["body"], "at_ms": ms(n["created_at"])} for n in notes],
+            "notes": notes,
             "requests": [{"iid": m["iid"], "title": m["title"], "state": m["state"], "draft": bool(m.get("draft")),
                           "source": m.get("source_branch"), "url": m["web_url"]} for m in mrs],
         }
@@ -661,9 +806,9 @@ class GitHub(Cli):
             return 600  # the primary limit resets hourly; one failing call per 10 minutes
         return None
 
-    def repository(self, query, **variables):
+    def repository(self, query, strict=False, tolerate=(), **variables):
         """repository(owner, name) {...} with the query's own variables."""
-        r = self.gql(query, {**self.vars, **variables})["repository"]
+        r = self.gql(query, {**self.vars, **variables}, strict, tolerate)["repository"]
         if not r:
             raise RuntimeError(f"repository {self.p.repo} not found")
         return r
@@ -903,6 +1048,80 @@ class GitHub(Cli):
                  "state": "opened" if i["state"] == "open" else "closed",
                  "assignees": [a["login"] for a in i.get("assignees") or []], "url": i["html_url"]} for i in items]
 
+    MILESTONE_ISSUES_Q = """query($o:String!,$n:String!,$m:Int!,$after:String){repository(owner:$o,name:$n){
+      milestone(number:$m){title issues(first:100,after:$after,states:[OPEN,CLOSED],
+      orderBy:{field:UPDATED_AT,direction:DESC}){totalCount pageInfo{hasNextPage endCursor} nodes{number databaseId
+      title state url updatedAt closedAt labels(first:20){nodes{name}} assignees(first:10){nodes{login}}
+      comments{totalCount} closedByPullRequestsReferences(first:20,includeClosedPrs:true){nodes{number title state
+      isDraft headRefName headRefOid url mergedAt repository{nameWithOwner}}}}}}}}"""
+    # A closing PR we can't see (SAML, a private fork) comes back null with an error at its path.
+    MILESTONE_ISSUES_OK = (r"\.closedByPullRequestsReferences\.nodes\.\*($|\.)", r"\.author($|\.)")
+
+    def milestone_number(self, title):
+        return next((m["number"] for m in self.all_pages(f"{self.repo}/milestones?state=all") if m["title"] == title), None)
+
+    def milestone_issues(self, title):
+        """The milestone's issues, most recently updated first, with the PRs that close them.
+        The number comes from the cached `milestones` (open ones) or else REST; a cached
+        number whose milestone has another title now is looked up again."""
+        empty = {"issues": [], "total": 0, "partial": False, "closes": True, "closes_reason": None}
+        known = self.p.peek("milestones")
+        number = next((m.get("id") for m in (known[0] if known else None) or [] if m.get("title") == title), None)
+        looked = number is None
+        if looked:
+            number = self.milestone_number(title)
+        if number is None:
+            return empty
+        issues, total, partial, after = [], None, False, None
+        for i in range(MILESTONE_PAGES):
+            ask = lambda: self.repository(self.MILESTONE_ISSUES_Q, True, self.MILESTONE_ISSUES_OK,
+                                          m=number, after=after)["milestone"]
+            ms_ = ask()
+            if i == 0 and (not ms_ or ms_.get("title") != title):
+                if looked:
+                    return empty
+                number, looked = self.milestone_number(title), True
+                if number is None:
+                    return empty
+                ms_ = ask()
+                if not ms_ or ms_.get("title") != title:
+                    return empty
+            if not ms_ or not ms_.get("issues") or not isinstance(ms_["issues"].get("nodes"), list):
+                raise RuntimeError("the milestone's issues didn't come back")
+            conn = ms_["issues"]
+            if total is None:
+                total = conn.get("totalCount")
+            for n in conn["nodes"]:
+                if not n:
+                    continue
+                reqs = []
+                for r in (n.get("closedByPullRequestsReferences") or {}).get("nodes") or []:
+                    # Only this repository's: another repo's #12 isn't our #12.
+                    if not r or not r.get("number") or \
+                            ((r.get("repository") or {}).get("nameWithOwner") or "").lower() != self.p.repo.lower():
+                        continue
+                    reqs.append({"iid": r["number"], "title": r.get("title"), "state": GH_STATE.get(r.get("state"), "opened"),
+                                 "draft": bool(r.get("isDraft")), "source": r.get("headRefName"), "url": r.get("url"),
+                                 "sha": r.get("headRefOid"), "merged_ms": ms(r.get("mergedAt")), "via": "closes"})
+                issues.append({
+                    "id": n.get("databaseId"), "iid": n["number"], "title": n["title"],
+                    "state": "opened" if n["state"] == "OPEN" else "closed",
+                    "labels": [l["name"] for l in (n.get("labels") or {}).get("nodes") or [] if l],
+                    "assignees": [a["login"] for a in (n.get("assignees") or {}).get("nodes") or [] if a],
+                    "url": n["url"], "updated_ms": ms(n.get("updatedAt")), "closed_ms": ms(n.get("closedAt")),
+                    "notes": (n.get("comments") or {}).get("totalCount", 0), "requests": reqs,
+                })
+            if not conn["pageInfo"]["hasNextPage"]:
+                break
+            after = conn["pageInfo"]["endCursor"]
+            if over_budget():
+                partial = True
+                break
+        else:
+            partial = True  # the page cap, with pages left
+        issues.sort(key=lambda x: (x["state"] != "opened", -(x["updated_ms"] or 0)))
+        return {"issues": issues, "total": total, "partial": partial, "closes": True, "closes_reason": None}
+
     # -- velocity (search; GitHub stops a search at 1000 results) --
 
     SEARCH_Q = ("query($q:String!,$after:String){search(query:$q,type:ISSUE,first:100,after:$after){"
@@ -991,8 +1210,35 @@ class GitHub(Cli):
         return [{"id": m["number"], "title": m["title"], "due": gh_day(m.get("due_on"))}
                 for m in self.all_pages(f"{self.repo}/milestones?state=open")]
 
+    NOTES_Q = ("query($o:String!,$n:String!,$i:Int!,$l:Int!){repository(owner:$o,name:$n){issue(number:$i){"
+               "comments(last:$l){nodes{databaseId author{__typename login} body createdAt}}}}}")
+    # No such issue: `issue` null with a NOT_FOUND error. A deleted author: null.
+    NOTES_OK = ((r"^repository\.issue$", "NOT_FOUND"), r"\.author($|\.)")
+
+    def issue_notes(self, iid, limit=None):
+        """(notes, partial): without a limit every comment, oldest first (REST); with one the
+        newest `limit`, newest first (one GraphQL call)."""
+        if limit is None:
+            return [{"id": c.get("id"), "author": (c.get("user") or {}).get("login"), "body": c.get("body") or "",
+                     "at_ms": ms(c.get("created_at"))} for c in self.all_pages(f"{self.repo}/issues/{iid}/comments")], False
+        issue = self.repository(self.NOTES_Q, True, self.NOTES_OK, i=int(iid), l=int(limit))["issue"]
+        if not issue:
+            return [], False
+        nodes = (issue.get("comments") or {}).get("nodes")
+        if not isinstance(nodes, list):
+            raise RuntimeError(f"#{iid}'s comments didn't come back")
+        out = []
+        for c in reversed(nodes):  # GraphQL lists them oldest first
+            if not c:
+                continue
+            a = c.get("author")
+            # REST names a bot `name[bot]`; GraphQL drops the suffix.
+            author = None if not a else (a.get("login") or "") + ("[bot]" if a.get("__typename") == "Bot" else "")
+            out.append({"id": c.get("databaseId"), "author": author, "body": c.get("body") or "", "at_ms": ms(c.get("createdAt"))})
+        return out, False
+
     def issue_detail(self, iid):
-        comments = self.all_pages(f"{self.repo}/issues/{iid}/comments")
+        comments = self.issue_notes(iid)[0]
         q = ("query($o:String!,$n:String!,$i:Int!){repository(owner:$o,name:$n){issue(number:$i){"
              "closedByPullRequestsReferences(first:20,includeClosedPrs:true){nodes{...P}}"
              " timelineItems(first:50,itemTypes:[CROSS_REFERENCED_EVENT,CONNECTED_EVENT]){nodes{"
@@ -1012,8 +1258,7 @@ class GitHub(Cli):
             reqs.append({"iid": r["number"], "title": r["title"], "state": GH_STATE.get(r.get("state"), "opened"),
                          "draft": bool(r.get("isDraft")), "source": r.get("headRefName"), "url": r["url"]})
         return {
-            "notes": [{"author": (c.get("user") or {}).get("login"), "body": c.get("body") or "", "at_ms": ms(c["created_at"])}
-                      for c in comments],
+            "notes": comments,
             "requests": reqs,
         }
 
@@ -1160,6 +1405,11 @@ class Project:
             self.db.execute("DELETE FROM cache WHERE at < ?", (now - CACHE_DAYS * 86400,))
         self.db.commit()
         return data, now, None
+
+    def peek(self, k):
+        """(data, fetched_at) of a cached answer in this shape, however old, or None. Never fetches."""
+        row = self.db.execute("SELECT at, json FROM cache WHERE k=? AND shape=?", (self.key(k), SHAPES)).fetchone()
+        return (json.loads(row[1]), row[0]) if row else None
 
     def drop(self, *keys):
         """Forget cached answers, in every shape: "pipelines" drops it and every
@@ -1321,6 +1571,56 @@ class Project:
     def milestone_items(self, title, max_age, force):
         items, at, err = self.cached(f"milestone:{title}", max_age, lambda: self.forge.milestone_items(title), [], force)
         return {"items": items, "at": at, "error": err}
+
+    def milestone_issues(self, title, max_age, force):
+        """The milestone's issues with the requests that close them (the forge's links) and,
+        from the cached `requests` / `merged` answers, those whose branch names the issue."""
+        data, at, err = self.cached(f"milestone-issues:{title}", max_age, lambda: self.forge.milestone_issues(title),
+                                    {"issues": [], "total": None, "partial": False, "closes": False, "closes_reason": None},
+                                    force)
+        issues = data["issues"]
+        iids = [i["iid"] for i in issues]
+        triage = {}
+        if iids:
+            q = f"SELECT iid, rank, priority, status, locked FROM triage WHERE iid IN ({','.join('?' * len(iids))})"
+            triage = {r[0]: {"rank": r[1], "priority": r[2], "status": r[3], "locked": bool(r[4])}
+                      for r in self.db.execute(q, iids)}
+        # Whatever another poll fetched lately, never a fetch of our own; an hour old is too old.
+        now, by_iid, used = time.time(), {}, {}
+        for k in ("requests", "merged"):
+            got = self.peek(k)
+            if not got or now - got[1] > PEEK_MAX_AGE:
+                used[k] = None
+                continue
+            rows, used[k] = got
+            for r in rows or []:
+                # requests first, then merged: a merge is final, so its row wins.
+                by_iid[r["iid"]] = {"iid": r["iid"], "title": r.get("title"), "state": "merged" if k == "merged" else "opened",
+                                    "draft": False if k == "merged" else bool(r.get("draft")), "source": r.get("source"),
+                                    "url": r.get("url"), "sha": r.get("head_sha") if k == "merged" else r.get("sha"),
+                                    "merged_ms": r.get("merged_ms") if k == "merged" else None, "_at": got[1]}
+        clean = lambda r: {**{k: v for k, v in r.items() if k != "_at"}, "title": one_line(r.get("title")),
+                           "source": one_line(r.get("source"))}
+        out = []
+        for i in issues:
+            reqs = []
+            for r in i.get("requests") or []:
+                c = by_iid.get(r["iid"])
+                # The fresher copy says what the request is now; a merge is newer whenever it came.
+                if c and (c["_at"] > at or c["state"] == "merged"):
+                    r = {**r, **{k: c[k] for k in ("state", "sha", "draft", "merged_ms")}}
+                reqs.append(clean(r))
+            linked = {r["iid"] for r in reqs}
+            for c in by_iid.values():
+                if c["iid"] not in linked and issue_in_branch(i["iid"], c["source"]):
+                    reqs.append(clean({**c, "via": "branch"}))
+            out.append({**i, "title": one_line(i.get("title")), "labels": [one_line(l) for l in i.get("labels") or []],
+                        "assignees": [one_line(a) for a in i.get("assignees") or []], "requests": reqs,
+                        "triage": triage.get(i["iid"])})
+        return {"issues": out, "total": data["total"], "partial": data["partial"],
+                "links": {"closes": data["closes"], "closes_reason": one_line(data["closes_reason"]),
+                          "requests": used["requests"], "merged": used["merged"]},
+                "at": at, "error": err}
 
     # -- velocity --
 
@@ -1587,8 +1887,11 @@ class Project:
                     self.db.execute("SELECT action, tab, at FROM launches WHERE iid=? ORDER BY at", (iid,))]
         # The triage agent reads this too: no control characters anywhere, names and titles
         # on one line.
-        notes = [{**n, "author": one_line(n.get("author")), "body": plain_text(n.get("body"))} for n in detail.get("notes", [])]
-        reqs = [{**r, "title": one_line(r.get("title")), "source": one_line(r.get("source"))} for r in detail.get("requests", [])]
+        notes = [{**n, "id": n.get("id"), "author": one_line(n.get("author")), "body": plain_text(n.get("body"))}
+                 for n in detail.get("notes", [])]
+        # sha, merged_ms and via: `milestone-issues` fills them; null here.
+        reqs = [{**r, "title": one_line(r.get("title")), "source": one_line(r.get("source")), "sha": r.get("sha"),
+                 "merged_ms": r.get("merged_ms"), "via": r.get("via")} for r in detail.get("requests", [])]
         return {"iid": iid, "issue": self.issue_out(iid), "description": plain_text(desc), "notes": notes,
                 "requests": reqs, "error": error, "launches": launches,
                 "triage": {"rank": t[0], "priority": t[1], "reason": one_line(t[2]), "status": t[3], "locked": bool(t[4])} if t else None}
@@ -1596,12 +1899,24 @@ class Project:
     def update(self, iid, fields):
         self.store(self.forge.issue_update(iid, fields), time.time())
         self.db.commit()
-        self.drop("milestones", "milestone")
+        # Wherever a write drops `milestone`, it drops `milestone-issues` too.
+        self.drop("milestones", "milestone", "milestone-issues")
         self.stale_velocity()
         return {"issue": self.issue_out(iid)}
 
+    def issue_notes(self, iid, max_age, force, n=20):
+        """The newest `n` comments of one issue, newest first, cleaned like `show`'s."""
+        n = max(1, min(100, int(n or 20)))
+        data, at, err = self.cached(f"notes:{iid}:{n}", max_age,
+                                    lambda: dict(zip(("notes", "partial"), self.forge.issue_notes(iid, n))),
+                                    {"notes": [], "partial": False}, force)
+        notes = [{**x, "id": x.get("id"), "author": one_line(x.get("author")), "body": plain_text(x.get("body"))}
+                 for x in data["notes"]]
+        return {"notes": notes, "partial": data["partial"], "at": at, "error": err}
+
     def comment(self, iid, body):
         self.forge.issue_comment(iid, body)
+        self.drop(f"notes:{iid}")
         # The comment bumps updated_at: pull the issue so the list and the details agree.
         self.store(self.forge.issue_get(iid), time.time())
         self.db.commit()
@@ -1859,6 +2174,8 @@ def main(argv):
         "runners": lambda: p.runners(age(0), force(1)),
         "milestones": lambda: p.milestones(age(0), force(1)),
         "milestone-items": lambda: p.milestone_items(a[0], age(1), force(2)),
+        "milestone-issues": lambda: p.milestone_issues(a[0], age(1), force(2)),
+        "issue-notes": lambda: p.issue_notes(int(a[0]), age(1), force(2), a[3] if len(a) > 3 else 20),
         "velocity": lambda: p.velocity(age(0), force(1), a[2], int(a[3]), a[4]),
         "sync": lambda: p.sync(float(a[0]) if a else 0, force(1)),
         "meta": p.labels_meta,

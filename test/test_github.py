@@ -258,6 +258,95 @@ class GitHub(unittest.TestCase):
         self.assertEqual((rows["merged"]["now"], rows["closed"]["now"], rows["cycle"]["now"]), (1, 1, 2 * DAY))
         self.assertRegex(self.calls()[0], r"merged:>=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
 
+    # -- milestone issues and issue notes --
+
+    @staticmethod
+    def mi(n, state="OPEN", prs=(), **kw):
+        return {"number": n, "databaseId": 1000 + n, "title": f"Issue {n}", "state": state, "url": f"{URL}/issues/{n}",
+                "updatedAt": iso(NOW - n * 60000), "closedAt": iso(NOW) if state == "CLOSED" else None,
+                "labels": {"nodes": [{"name": "bug"}]}, "assignees": {"nodes": [{"login": "ann"}]},
+                "comments": {"totalCount": 2}, "closedByPullRequestsReferences": {"nodes": list(prs)}, **kw}
+
+    @staticmethod
+    def cpr(n, r="acme/shop", **kw):
+        return {"number": n, "title": f"PR {n}", "state": "MERGED", "isDraft": False, "headRefName": f"b{n}",
+                "headRefOid": f"sha{n}", "url": f"{URL}/pull/{n}", "mergedAt": iso(NOW), "repository": {"nameWithOwner": r}, **kw}
+
+    def milestone_route(self, title, nodes, pattern=r"milestone\(number", **extra):
+        return [pattern, {"out": {"data": {"repository": {"milestone": {"title": title, "issues": {
+            "totalCount": len(nodes), **conn(nodes)}}}}, **extra}}]
+
+    def prime_milestones(self):
+        self.routes([[r"milestones\(states:OPEN", repo(milestones=conn([{
+            "number": 3, "title": "v1", "dueOn": None, "url": f"{URL}/milestone/3",
+            "open": {"totalCount": 1}, "closed": {"totalCount": 1}}]))]])
+        self.run_forge("milestones", *P, 600, 0)
+
+    def test_milestone_issues_come_with_their_closing_prs(self):
+        self.prime_milestones()
+        self.routes([self.milestone_route("v1", [self.mi(1, "CLOSED", [self.cpr(5), self.cpr(6, r="other/repo")]), self.mi(2)])])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertIsNone(out["error"])
+        self.assertTrue(any("orderBy:{field:UPDATED_AT" in c and "-F m=3" in c for c in self.calls()))
+        self.assertFalse(any("milestones?state=all" in c for c in self.calls()), "the cached list had the number")
+        self.assertEqual([i["iid"] for i in out["issues"]], [2, 1], "open first")
+        reqs = out["issues"][1]["requests"]
+        self.assertEqual([(r["iid"], r["state"], r["via"]) for r in reqs], [(5, "merged", "closes")])
+        self.assertEqual((reqs[0]["sha"], reqs[0]["merged_ms"]), ("sha5", NOW // 1000 * 1000))
+        self.assertEqual((out["links"]["closes"], out["total"], out["partial"]), (True, 2, False))
+        self.assertEqual((out["issues"][0]["labels"], out["issues"][0]["notes"]), (["bug"], 2))
+
+    def test_milestone_issues_look_the_number_up_without_a_cached_list(self):
+        self.routes([[r"milestones\?state=all", {"out": [{"number": 3, "title": "v1"}]}],
+                     self.milestone_route("v1", [self.mi(1)])])
+        self.assertEqual([i["iid"] for i in self.run_forge("milestone-issues", *P, "v1", 600, 0)["issues"]], [1])
+        out = self.run_forge("milestone-issues", *P, "nope", 600, 0)
+        self.assertEqual((out["issues"], out["total"], out["error"]), ([], 0, None))
+
+    def test_milestone_issues_notice_a_renamed_milestone(self):
+        self.prime_milestones()
+        self.routes([[r"milestones\?state=all", {"out": [{"number": 3, "title": "v1.0"}]}], self.milestone_route("v1.0", [self.mi(1)])])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertEqual((out["issues"], out["error"]), ([], None), "not another milestone's issues under the old name")
+        self.routes([[r"milestones\?state=all", {"out": [{"number": 3, "title": "v1.0"}, {"number": 4, "title": "v1"}]}],
+                     self.milestone_route("v1", [self.mi(1)], pattern=r"milestone\(number.* -F m=4"),
+                     self.milestone_route("v1.0", [self.mi(9)])])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 1)
+        self.assertEqual([i["iid"] for i in out["issues"]], [1])
+
+    def test_milestone_issues_skip_a_closing_pr_they_cant_see(self):
+        self.prime_milestones()
+        saml = {"message": "SAML", "type": "FORBIDDEN",
+                "path": ["repository", "milestone", "issues", "nodes", 0, "closedByPullRequestsReferences", "nodes", 1]}
+        # gh exits 1 when any part of a query failed.
+        self.routes([[r"milestone\(number", {**self.milestone_route("v1", [self.mi(1, prs=[self.cpr(5), None])], errors=[saml])[1], "exit": 1}]])
+        out = self.run_forge("milestone-issues", *P, "v1", 600, 0)
+        self.assertIsNone(out["error"])
+        self.assertEqual([r["iid"] for r in out["issues"][0]["requests"]], [5])
+
+    def test_issue_notes_come_newest_first(self):
+        # Oldest first, as GraphQL lists them; a deleted account's author is null.
+        self.routes([[r"comments\(last", repo(issue={"comments": {"nodes": [
+            {"databaseId": None, "author": None, "body": "ghost", "createdAt": iso(NOW - 120000)},
+            {"databaseId": 1, "author": {"__typename": "User", "login": "di"}, "body": "old", "createdAt": iso(NOW - 60000)},
+            {"databaseId": 2, "author": {"__typename": "Bot", "login": "eng"}, "body": "new\x1b[2J", "createdAt": iso(NOW)}]}})]])
+        out = self.run_forge("issue-notes", *P, 7, 60, 0, 3)
+        self.assertIsNone(out["error"])
+        self.assertTrue(any("-F l=3" in c and "-F i=7" in c for c in self.calls()))
+        self.assertEqual([(n["id"], n["author"], n["body"]) for n in out["notes"]],
+                         [(2, "eng[bot]", "new[2J"), (1, "di", "old"), (None, None, "ghost")])
+        self.assertFalse(out["partial"])
+
+    def test_issue_notes_of_a_missing_issue_are_empty(self):
+        self.routes([[r"comments\(last", {"out": {"data": {"repository": {"issue": None}}, "errors": [
+            {"type": "NOT_FOUND", "path": ["repository", "issue"], "message": "Could not resolve to an Issue with the number of 99."}]},
+            "exit": 1}]])
+        out = self.run_forge("issue-notes", *P, 99, 60, 0)
+        self.assertEqual((out["notes"], out["error"]), ([], None))
+        self.routes([[r"comments\(last", {"out": {"data": {"repository": {"issue": None}}, "errors": [{"message": "Something went wrong"}]},
+                                          "exit": 1}]])
+        self.assertEqual(self.run_forge("issue-notes", *P, 98, 60, 0)["error"], "Something went wrong", "an error without a path fails")
+
     # -- issues --
 
     def test_issues_sync_and_query_with_github_scoped_labels(self):
@@ -277,7 +366,7 @@ class GitHub(unittest.TestCase):
         self.sync_issues([issue(1)])
         p = lambda n, r="acme/shop", **kw: {"number": n, "title": f"PR {n}", "state": "MERGED", "isDraft": False,
                                              "headRefName": f"b{n}", "url": f"{URL}/pull/{n}", "repository": {"nameWithOwner": r}, **kw}
-        self.routes([[r"issues/1/comments", {"out": [{"user": {"login": "di"}, "body": "hi\x1b[2J", "created_at": iso(NOW)}]}],
+        self.routes([[r"issues/1/comments", {"out": [{"id": 1, "user": {"login": "di"}, "body": "hi\x1b[2J", "created_at": iso(NOW)}]}],
                      [r"timelineItems", repo(issue={
                          "closedByPullRequestsReferences": {"nodes": [p(5)]},
                          "timelineItems": {"nodes": [{"source": p(5)}, {"source": p(6, state="OPEN", isDraft=True)},
@@ -286,7 +375,7 @@ class GitHub(unittest.TestCase):
         self.assertIsNone(out["error"])
         self.assertEqual([(r["iid"], r["state"], r["draft"]) for r in out["requests"]],
                          [(5, "merged", False), (6, "opened", True), (8, "closed", False)])
-        self.assertEqual(out["notes"], [{"author": "di", "body": "hi[2J", "at_ms": NOW // 1000 * 1000}])
+        self.assertEqual(out["notes"], [{"id": 1, "author": "di", "body": "hi[2J", "at_ms": NOW // 1000 * 1000}])
 
     def test_update_translates_fields(self):
         self.sync_issues([issue(1, ["priority: low"])])
