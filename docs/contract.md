@@ -254,7 +254,11 @@ Deployments {environment, named, deploys, url, latest: {sha, ref, at_ms} | null,
            budget, so `live` may be missing some (or, with deploys null, the environment list
            was cut short): call again soon. With nothing fetched yet: deploys null, live {}, at 0.
            The environment list is read hourly; a forced read lists it again only when the
-           cached list picks no environment
+           cached list picks no environment. On GitLab a list over 100 is read 3 pages deep
+           (production, prod and live are also looked up by exact name), and not past page 1
+           once `production` is known: so a case variant past page 3, or a forge.json-named
+           environment that isn't on the pages read, is missed (the named one is then read
+           under the name as given, with url null)
 Pipeline   {id, iid, ref, sha, status, source, updated_ms, url, name?} ref: "main" or "!811";
            source: "request" (an MR/PR pipeline), else the forge's word (push, schedule, web...);
            name: the workflow's name (GitHub only)

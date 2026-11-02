@@ -510,10 +510,14 @@ class GitLab(Cli):
 
     def environments(self):
         """{"envs": [{name, tier, url, available}], "stopped": None | "found" | "cap" | "budget"}:
-        the available environments. `stopped` says the listing was cut short ("found": once a
-        production-like name is known, since the rest only feeds the tier fallback). Review-app
-        projects can hold thousands, so the production-like names are looked up by name: the cap
-        only limits the `tier` fallback."""
+        the available environments. `stopped` says the listing was cut short. Review-app projects
+        can hold thousands, so production, prod and live are looked up by name (exact case), and
+        only ENVIRONMENT_PAGES pages are read. Past them pick_environment can miss the `tier`
+        fallback, a case variant (`Production`, which would outrank a looked-up `prod`), and a
+        forge.json-named environment's url and spelling (it then reads the name as given).
+        "found": `production` itself (any case) is known, so nothing later can outrank it for the
+        unnamed pick; paging stops there. The named pick's url and spelling are the one thing
+        that early stop gives up: the list is cached unnamed, shared by both picks."""
         envs, stopped = {}, None
 
         def add(batch):
@@ -536,7 +540,7 @@ class GitLab(Cli):
                  if isinstance(e, dict) and e.get("name") == n])  # name= is exact; check anyway
             if n in envs:
                 break
-        if any(k.lower() in PROD_NAMES for k in envs):  # the tier fallback is never reached
+        if any(k.lower() == PROD_NAMES[0] for k in envs):  # the first preference: nothing outranks it
             return {"envs": list(envs.values()), "stopped": "found"}
         page = 2
         while True:

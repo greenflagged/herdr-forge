@@ -340,6 +340,14 @@ class Forge(unittest.TestCase):
         out = self.run_forge("deployments", *P, 60, 0)
         self.assertEqual((out["environment"], out["deploys"]), ("production", True))
         self.assertFalse(any("page=2" in c for c in self.calls()), "production known: no paging for the tier fallback")
+        # prod found by name: paging goes on, and a case variant of production there outranks it.
+        self.tmp.cleanup(); self.setUp()
+        self.routes([[r"environments\?states=available&name=prod$", {"out": [env(8, "prod")]}],
+                     [r"environments\?states=available&per_page=100&page=2$", {"out": [*page(2)[:50], env(9, "Production")]}],
+                     *routes, [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}]])
+        self.assertEqual(self.run_forge("deployments", *P, 60, 0)["environment"], "Production")
+        self.assertTrue(any("page=2" in c for c in self.calls()), "prod known: production may still be on a later page")
+        self.assertFalse(any("page=3" in c for c in self.calls()), "page 2 was short: the list ended")
         # production on page 1: no lookups by name, no paging.
         self.tmp.cleanup(); self.setUp()
         self.routes([[ENVS, {"out": [*page(1)[:99], env(7, "production")]}], *routes[1:],
