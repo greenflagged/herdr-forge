@@ -257,8 +257,8 @@ class GitHub(unittest.TestCase):
         self.routes([*listed, [r"environments/(production|prod|live)$", {"err": "gh: Not Found (HTTP 404)"}],
                      [r"deployments\?environment=\w+&per_page=1$", {"out": []}]])
         out = self.run_forge("deployments", *P, 60, 0)
-        self.assertEqual((out["environment"], out["deploys"]), (None, None), "a capped list never says no deploy step")
-        self.assertIn("forge.json", out["error"])
+        self.assertEqual((out["environment"], out["deploys"], out["error"]), (None, False, None),
+                         "capped, but no production-like name exists and GitHub has no tier fallback: complete")
         self.tmp.cleanup(); self.setUp()
         # Not capped, and nothing production-like: no deploy step.
         self.routes([[GENVS, {"out": {"total_count": 1, "environments": [{"name": "staging"}]}}], [ALL_DEPS, {"out": []}],

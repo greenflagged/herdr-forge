@@ -237,6 +237,32 @@ class Forge(unittest.TestCase):
         out = self.run_forge("deployments", *P, 0, 1)
         self.assertEqual((out["deploys"], out["error"]), (False, None), "nothing in 120 days: no deploy step")
 
+    def test_deploys_follows_the_argument_not_the_cached_answers(self):
+        now = time.time() * 1000
+        self.routes([[ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(5, "d5", now - 300 * 86400000)]}],
+                     [ANY_DEPS, {"out": [dep(5, "d5", now - 300 * 86400000)]}]])
+        self.assertTrue(self.run_forge("deployments", *P, 60, 0, "production")["deploys"], "named: deploys")
+        n = len(self.calls())
+        out = self.run_forge("deployments", *P, 3600, 0)
+        self.assertEqual(len(self.calls()), n, "the same cached answer")
+        self.assertEqual((out["named"], out["deploys"]), (False, False), "unnamed: nothing in 120 days")
+        self.assertTrue(self.run_forge("deployments", *P, 3600, 0, "production")["deploys"])
+
+    def test_a_forced_read_keeps_the_environment_lists_hourly_floor(self):
+        now = time.time() * 1000
+        self.routes([[ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}]])
+        self.run_forge("deployments", *P, 60, 0)
+        n = sum(bool(re.search(ENVS, c)) for c in self.calls())
+        self.run_forge("deployments", *P, 0, 1)
+        self.assertEqual(sum(bool(re.search(ENVS, c)) for c in self.calls()), n, "production known: not listed again")
+        self.assertEqual(sum(bool(re.search(OK_DEPS, c)) for c in self.calls()), 2, "the deployments are")
+        # A list that picks nothing is read again when forced: one may have been added.
+        self.tmp.cleanup(); self.setUp()
+        self.routes([[ENVS, {"out": [env(3, "staging")]}]])
+        self.run_forge("deployments", *P, 60, 0)
+        self.run_forge("deployments", *P, 0, 1)
+        self.assertEqual(sum(bool(re.search(ENVS, c)) for c in self.calls()), 2)
+
     def test_deployments_refuse_a_bad_environment_but_take_an_empty_one(self):
         self.routes([[ENVS, {"out": []}]])
         self.assertIn("bad environment", self.run_forge("deployments", *P, 60, 0, "prod\nx")["error"])
@@ -313,6 +339,13 @@ class Forge(unittest.TestCase):
                      [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}]])
         out = self.run_forge("deployments", *P, 60, 0)
         self.assertEqual((out["environment"], out["deploys"]), ("production", True))
+        self.assertFalse(any("page=2" in c for c in self.calls()), "production known: no paging for the tier fallback")
+        # production on page 1: no lookups by name, no paging.
+        self.tmp.cleanup(); self.setUp()
+        self.routes([[ENVS, {"out": [*page(1)[:99], env(7, "production")]}], *routes[1:],
+                     [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}]])
+        self.assertEqual(self.run_forge("deployments", *P, 60, 0)["environment"], "production")
+        self.assertFalse(any("page=2" in c or "&name=" in c for c in self.calls()))
         # Out of budget after page 1: can't tell yet, and the list is read again soon.
         self.tmp.cleanup(); self.setUp()
         self.routes(routes)

@@ -509,10 +509,11 @@ class GitLab(Cli):
     # -- deployments --
 
     def environments(self):
-        """{"envs": [{name, tier, url, available}], "stopped": None | "cap" | "budget"}: the
-        available environments. `stopped` says the listing was cut short. Review-app projects can
-        hold thousands, so the production-like names are looked up by name: the cap only limits
-        the `tier` fallback."""
+        """{"envs": [{name, tier, url, available}], "stopped": None | "found" | "cap" | "budget"}:
+        the available environments. `stopped` says the listing was cut short ("found": once a
+        production-like name is known, since the rest only feeds the tier fallback). Review-app
+        projects can hold thousands, so the production-like names are looked up by name: the cap
+        only limits the `tier` fallback."""
         envs, stopped = {}, None
 
         def add(batch):
@@ -535,6 +536,8 @@ class GitLab(Cli):
                  if isinstance(e, dict) and e.get("name") == n])  # name= is exact; check anyway
             if n in envs:
                 break
+        if any(k.lower() in PROD_NAMES for k in envs):  # the tier fallback is never reached
+            return {"envs": list(envs.values()), "stopped": "found"}
         page = 2
         while True:
             if page > ENVIRONMENT_PAGES:
@@ -1084,6 +1087,10 @@ class GitHub(Cli):
             if self.api(f"{self.repo}/deployments?environment={q}&per_page=1"):
                 names.setdefault(n, None)
                 break
+        else:
+            # No production-like name exists, and GitHub has no tier fallback: however long the
+            # list, nothing in the rest of it could be picked.
+            stopped = None
         return out(stopped)
 
     def deployments(self, env, seen):
@@ -1737,9 +1744,13 @@ class Project:
                  "partial": False}
         # Hourly, unless the last listing stopped at the time budget: then finish it soon.
         old = self.peek("environments")
-        cut = bool(old and isinstance(old[0], dict) and old[0].get("stopped") == "budget")
+        old = old[0] if old and isinstance(old[0], dict) else None
+        cut = bool(old and old.get("stopped") == "budget")
+        # A forced read re-lists only when the known list picks nothing (one may have been
+        # added since): otherwise the list keeps its hourly floor.
+        relist = force and (old is None or pick_environment(old.get("envs"), environment) is None)
         envs, env_at, env_err = self.cached("environments", max_age if max_age < 0 or cut else max(max_age, ENVIRONMENTS_EVERY),
-                                            self.forge.environments, None, force)
+                                            self.forge.environments, None, relist)
         if envs is None and not named:
             # No list, so no telling whether a production environment exists: never "doesn't deploy".
             return {**blank, "at": 0, "error": env_err}
@@ -1798,13 +1809,17 @@ class Project:
                     "latest": {k: deps[0][k] for k in ("sha", "ref", "at_ms")} if deps else None,
                     "live": live, "partial": partial,
                     # Private: stripped below. Pairs known not to be contained, GitHub verdicts.
-                    "_no": sorted(list(p) for p in no), "_seen": {k: v for k, v in seen.items() if k in set(listed)}}
+                    "_recent": recent, "_no": sorted(list(p) for p in no), "_seen": {k: v for k, v in seen.items() if k in set(listed)}}
 
         data, at, err = self.cached(f"deployments:{env}", max_age, fetch,
                                     {**blank, "environment": env, "url": pick.get("url")}, force)
         out = {k: v for k, v in data.items() if not k.startswith("_")}
         out["named"], out["url"] = named, pick.get("url") or out.get("url")
-        if named and out.get("deploys") is False:  # an answer cached before forge.json named it
+        # Named and unnamed reads share the cache: deploys follows this call's argument, not the
+        # one the cached answer was fetched under.
+        if "_recent" in data:
+            out["deploys"] = named or data["_recent"]
+        elif named and out.get("deploys") is False:  # a row cached before `_recent` was kept
             out["deploys"] = True
         return {**out, "at": at, "error": err or env_err}
 

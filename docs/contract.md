@@ -252,7 +252,9 @@ Deployments {environment, named, deploys, url, latest: {sha, ref, at_ms} | null,
            includes, with that deployment's commit and finish time; only merges still in
            `merged`, so read it at least as often as `merged`. partial: stopped at the time
            budget, so `live` may be missing some (or, with deploys null, the environment list
-           was cut short): call again soon. With nothing fetched yet: deploys null, live {}, at 0
+           was cut short): call again soon. With nothing fetched yet: deploys null, live {}, at 0.
+           The environment list is read hourly; a forced read lists it again only when the
+           cached list picks no environment
 Pipeline   {id, iid, ref, sha, status, source, updated_ms, url, name?} ref: "main" or "!811";
            source: "request" (an MR/PR pipeline), else the forge's word (push, schedule, web...);
            name: the workflow's name (GitHub only)
@@ -338,6 +340,8 @@ mixes PRs into issues). Mods must cope with the nulls:
   hourly. A superseded deployment keeps its `success`. Environments come from the environments
   list and from the recent deployments (one made through the API can name an environment with
   no settings page). `url` is the environment's deployments page. List order isn't relied on.
+  A long environment list (over 100) whose `production`, `prod` and `live` lookups all come
+  back empty still counts as complete: GitHub has no tier fallback, so it answers `deploys: false`.
 - GraphQL answers with some failed fields (an inaccessible cross-reference) keep what came
   back; `gh` exits 1 for them, so `run` hands back their output. `milestone-issues` and
   `issue-notes` are stricter. `milestone-issues` skips only an error inside a closing PR.
