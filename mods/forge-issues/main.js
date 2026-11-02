@@ -9,9 +9,9 @@ import {
 import { forgeClient, projectOf, issueItem, actionList, matches, runAction, describe, actionLabel, ago, openUrl, stamp } from "./lib.js";
 import { Chrome, button, chip, note, staleError, dropdown } from "./ui.js";
 import {
-  STATES, DEFAULT_SEP, sorts, nextSort, splitLabels, scopedChange, labelToggle, scopeValues, metaScopes,
+  STATES, PEOPLE, DEFAULT_SEP, sorts, nextSort, splitLabels, scopedChange, labelToggle, scopeValues, metaScopes,
   orderScopes, scopeTitle, facetEntries, togglePick, listQuery, triageConfig, skillLine, usesPriority, isAgentAction, scopeOf,
-  startView,
+  startView, projectStateKey, syncDue,
 } from "./issues.js";
 
 // An issue browser, opened as a tab: tab.new { name, mod: "forge-issues", props }.
@@ -22,7 +22,7 @@ import {
 //   scopeSep: "::"                     the scoped-label separator (default: the forge's)
 //   triage: true | { agent, task, tab } the optional triage agent (off by default)
 //   issue: 123                         open this issue at once (a link into the tab from another mod)
-//   view: { state, sort, picked, q }   where the list starts, e.g. { picked: { "scope:type": ["bug"] } }
+//   view: { state, sort, picked, q, person }   person: "all", "assigned" or "created"
 // Keys on the list: ↑/↓ or j/k move the selection, / searches, Esc clears the search,
 // Enter opens the selected issue in the browser.
 // forge.py keeps the issues in SQLite on `on` and does the filtering, counting and
@@ -37,7 +37,7 @@ import {
 const MOD = "forge-issues";
 const ROW = 30;
 const PAGE = 150;
-const POLL_FOCUSED = 60000, POLL_AWAY = 300000;
+const ACCOUNT_AGE = 3600; // seconds: the login is shared with SQLite, not refetched per search
 const ACCEPT_ROUNDS = 20; // accept-all answers `more` after ~18 s of work: call again
 // A row as `query` sends it.
 const [IID, TITLE, STATE, PRIO, TYPE, REQS, UPDATED, PROPOSED, LAUNCHED] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
@@ -71,12 +71,21 @@ export default class Issues extends View {
     this.seq = 0;                // newest list query; older answers are dropped
     this.listPending = null;     // the seq of the list load in flight
     this.paging = false;
-    // props.view: where the list starts ("my open bugs"); the person changes it from there.
-    const view = startView(props()?.view);
+    this.booting = true;
+    this.account = null; this.accountAt = 0; this.accountCall = null;
+    const key = projectStateKey(this.project());
+    this.viewKey = `${MOD}.view:${key}`;
+    // Older local previews duplicated private titles in Herdr's shared.json, which
+    // need not be private. Drop those; issue content stays in Forge's 0700 cache.
+    const legacyCacheKey = `${MOD}.cache:${key}`;
+    if (shared(legacyCacheKey) != null) setShared(legacyCacheKey, null);
+    // Saved choices win over the layout's initial defaults, independently per project.
+    const view = startView(shared(this.viewKey) ?? props()?.view);
     this.state = view.state;
     this.sort = view.sort;
     this.picked = view.picked;   // group -> [values] (OR within, AND across)
     this.query = view.q;
+    this.person = view.person;
     this.selected = null;
     this.detail = null;          // show() of the selected issue
     this.detailError = null;
@@ -92,6 +101,7 @@ export default class Issues extends View {
     this.chrome = new Chrome(MOD, { repo: props()?.repo }, { width: 1100, height: 700 });
     this.chrome.attach(cx);
     this.keys = cx.focus_handle();
+    this.peopleKeys = cx.focus_handle();
     this.scroll = VirtualListScrollHandle.new();
     this.inputFocused = false;
     const { terms } = this.project();
@@ -106,12 +116,23 @@ export default class Issues extends View {
     // Stale first: what SQLite has now, then a sync with the forge.
     cx.spawn(async (cx) => {
       if (!this.ready()) return;
-      await Promise.all([this.readMeta(), this.loadList(++this.seq)]);
+      // One local Python call returns the cached list, metadata, sync age and
+      // login. No issue content is duplicated into Herdr's shared state.
+      const seq = ++this.seq;
+      try {
+        const cached = await this.py(["bootstrap", JSON.stringify(this.queryOptions(0))]);
+        if (cached.error) throw new Error(cached.error);
+        this.applyMeta(cached);
+        if (seq === this.seq) await this.loadList(seq, cached.list ?? null);
+      } catch (e) {
+        if (seq === this.seq) { this.listError = msg(e); this.loadFailed = true; }
+      }
       const first = Number(props()?.issue);
       if (Number.isInteger(first) && first > 0) this.open(first, cx);
       cx.notify();
       if (this.triage()) this.checkSkill(cx, false);
-      this.sync(cx, false);
+      this.booting = false;
+      if (this.shown() && syncDue(this.lastPoll, this.syncMore, window().active)) this.sync(cx, false);
     });
     // Searching waits for a pause in typing; the next page waits for the list to need it.
     cx.timer.every(150, (cx) => {
@@ -125,13 +146,13 @@ export default class Issues extends View {
     });
     // Sync only while shown: a background tab keeps running but mustn't poll.
     cx.timer.every(5000, (cx) => {
-      if (!this.shown()) return;
-      const every = this.syncMore ? 0 : window().active ? POLL_FOCUSED : POLL_AWAY;
-      if (Date.now() - this.lastPoll >= every) this.sync(cx, false);
+      if (this.booting || !this.shown()) return;
+      if (syncDue(this.lastPoll, this.syncMore, window().active)) this.sync(cx, false);
     });
   }
 
   async close() {
+    this.saveView();
     const s = shared(`${MOD}.selected`);
     const { repo, host } = this.project();
     if (s && s.repo === repo && s.host === host) setShared(`${MOD}.selected`, null);
@@ -142,6 +163,29 @@ export default class Issues extends View {
   project() { return projectOf(props() ?? {}); }
   ready() { const p = this.project(); return Boolean(p.repo && p.provider); }
   triage() { return triageConfig(props()?.triage); }
+
+  currentView() {
+    return { state: this.state, sort: this.sort, picked: this.picked, q: this.query, person: this.person };
+  }
+
+  saveView() {
+    if (!this.viewKey) return;
+    const value = startView({ ...this.currentView(), q: this.pendingQuery ?? this.query });
+    if (JSON.stringify(shared(this.viewKey)) !== JSON.stringify(value)) setShared(this.viewKey, value);
+  }
+
+  async signedInUser() {
+    if (this.account && Date.now() - this.accountAt < ACCOUNT_AGE * 1000) return this.account;
+    if (!this.accountCall) {
+      this.accountCall = (async () => {
+        const out = await this.py(["whoami", ACCOUNT_AGE, this.accountForce ? 1 : 0]);
+        if (out.error || !out.user) throw new Error(`Couldn't identify your signed-in account: ${out.error ?? "no account returned"}`);
+        this.account = out.user; this.accountAt = Date.now(); this.accountForce = false;
+        return out.user;
+      })().finally(() => { this.accountCall = null; });
+    }
+    return this.accountCall;
+  }
 
   sep() {
     return props()?.scopeSep ?? this.sepSeen ?? DEFAULT_SEP[this.project().provider] ?? "::";
@@ -177,13 +221,13 @@ export default class Issues extends View {
         const out = await this.py(["sync", this.since, force ? 1 : 0]);
         const first = !this.since;
         this.since = out.now ?? this.since;
-        this.lastSync = (out.last_sync ?? 0) * 1000;
+        if (out.last_sync != null) this.lastSync = out.last_sync * 1000;
         this.syncError = this.nocliText(out) ?? out.error ?? null;
         this.syncMore = Boolean(out.more);
         const triageMoved = (out.triage_at ?? 0) > (this.triageAt ?? 0);
         this.triageAt = out.triage_at ?? 0;
         if (out.triage_run !== undefined) this.triageRun = out.triage_run;
-        if (out.changed || (!first && triageMoved)) {
+        if (force || out.changed || (!first && triageMoved)) {
           this.reload(cx);
           if (this.selected) this.open(this.selected, cx);
         }
@@ -202,21 +246,57 @@ export default class Issues extends View {
 
   async readMeta() {
     try {
-      const m = await this.py(["meta"]);
-      if (Array.isArray(m.labels)) this.labels = m.labels;
-      if (Array.isArray(m.milestones)) this.milestones = m.milestones;
-      if (m.sep) this.sepSeen = m.sep;
+      this.applyMeta(await this.py(["meta"]));
     } catch { /* the list read shows why */ }
   }
 
-  queryJson(offset) {
-    return listQuery({ state: this.state, q: this.query, picked: this.picked, sort: this.sort, offset, limit: PAGE, sep: props()?.scopeSep });
+  applyMeta(m) {
+    if (Array.isArray(m.labels)) this.labels = m.labels;
+    if (Array.isArray(m.milestones)) this.milestones = m.milestones;
+    if (m.sep) this.sepSeen = m.sep;
+    if (m.last_sync != null) {
+      this.lastSync = m.last_sync * 1000;
+      this.lastPoll = Math.max(this.lastPoll, this.lastSync);
+    }
+    if (this.booting) {
+      this.since = m.now ?? 0;
+      this.syncMore = Boolean(m.more);
+      this.triageRun = m.triage_run ?? null;
+      this.triageAt = m.triage_at ?? 0;
+    }
+    if (m.user && !this.accountForce) { this.account = m.user; this.accountAt = m.user_at * 1000; }
   }
 
-  async loadList(seq) {
+  queryOptions(offset) {
+    return { state: this.state, q: this.query, picked: this.picked, sort: this.sort, offset, limit: PAGE, sep: props()?.scopeSep, person: this.person };
+  }
+
+  async queryJson(offset) {
+    // Snapshot before looking up the account: a newer filter change must not change an
+    // in-flight query. whoami uses this project's host and machine, not a local guess.
+    const options = this.queryOptions(offset);
+    if (options.person !== "all") {
+      options.user = await this.signedInUser();
+    }
+    return listQuery(options);
+  }
+
+  setPerson(person, cx) {
+    if (person === this.person) return;
+    this.person = person;
+    // Never display an unfiltered list under a personal filter if account lookup fails.
+    this.rows = []; this.matched = 0; this.total = 0; this.counts = {};
+    this.loadedOnce = false; this.loadFailed = false; this.listError = null;
+    this.selected = null; this.openAt = 0; this.confirming = null; this.picker.open = null;
+    this.setDetail(null);
+    this.reload(cx);
+    cx.notify();
+  }
+
+  async loadList(seq, cached = null) {
     this.listPending = seq; // more() waits for it: its rows replace the list
     try {
-      const out = await this.py(["query", this.queryJson(0)]);
+      const out = cached ?? await this.py(["query", await this.queryJson(0)]);
       if (seq !== this.seq) return;
       if (!Array.isArray(out.rows)) throw new Error(this.nocliText(out) ?? out.error ?? "no answer");
       this.rows = out.rows;
@@ -240,6 +320,7 @@ export default class Issues extends View {
   // The list from the top, after anything that changes what's in it.
   reload(cx) {
     if (!this.ready()) return;
+    this.saveView();
     const seq = ++this.seq;
     cx.spawn(async (cx) => { await this.loadList(seq); cx.notify(); });
   }
@@ -253,7 +334,7 @@ export default class Issues extends View {
     const seq = this.seq, from = this.rows, offset = from.length;
     cx.spawn(async (cx) => {
       try {
-        const out = await this.py(["query", this.queryJson(offset)]);
+        const out = await this.py(["query", await this.queryJson(offset)]);
         if (seq === this.seq && this.rows === from && Array.isArray(out.rows)) this.rows = from.concat(out.rows);
       } catch { /* the next scroll asks again */ }
       this.paging = false;
@@ -695,7 +776,7 @@ export default class Issues extends View {
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .when(this.inputFocused, (e) => e.border_color(t.accent))
         .child(Input.new(this.input).h_full().text_size(12.5).text_color(t.foreground)))
-      .child(h_flex().gap(8).items_center().child(h_flex().flex_none().rounded(6).border_1().border_color(t.border).children(STATES.map((s) =>
+      .child(h_flex().gap(8).items_center().flex_wrap().child(h_flex().flex_none().rounded(6).border_1().border_color(t.border).children(STATES.map((s) =>
         div().id(`st-${s.id}`).px(8).py(3).text_size(11.5).cursor_pointer()
           .when(this.state === s.id, (e) => e.bg(t.selected).text_color(t.foreground))
           .when(this.state !== s.id, (e) => e.text_color(t.muted))
@@ -705,7 +786,19 @@ export default class Issues extends View {
         .hover((s) => s.bg(t.hover))
         .tooltip("Sort (click to change)")
         .on_click((_e, cx) => { this.sort = nextSort(sort.id, triaged); this.reload(cx); cx.notify(); })
-        .child(`↕ ${sort.label}`)));
+        .child(`↕ ${sort.label}`))
+      .child(h_flex().id("issues-people").flex_none().gap(6).items_center().track_focus(this.peopleKeys)
+        .tooltip("Filter by your signed-in account. Focus here and use ←/→ to change.")
+        .on_key_down((e, cx) => {
+          const key = e.key ?? e.keystroke;
+          if (key !== "left" && key !== "right") return;
+          cx.stop_propagation();
+          const at = PEOPLE.findIndex((p) => p.id === this.person);
+          this.setPerson(PEOPLE[(at + (key === "right" ? 1 : PEOPLE.length - 1)) % PEOPLE.length].id, cx);
+        })
+        .child(div().flex_none().text_size(11).text_color(t.dim).child("People"))
+        .child(dropdown(t, "issues-person", PEOPLE.map((p) => [p.id, p.label]), this.person,
+          (person, cx) => { this.peopleKeys.focus(); this.setPerson(person, cx); }, this.picker))));
     const err = this.error ?? this.listError ?? this.syncError;
     const status = h_flex().h(24).flex_none().px(12).gap(8).items_center().border_t(1).border_color(t.border)
       .text_size(11).text_color(t.dim)
@@ -892,7 +985,11 @@ export default class Issues extends View {
     const header = this.chrome.header(t, {
       title: "Issues", count: this.loadedOnce ? (filtered ? `${this.matched}/${this.total}` : this.total) : null,
       sub: repo, at: this.lastSync || null, loading: this.syncing,
-      onRefresh: repo && provider ? (cx) => { if (!this.loadedOnce) this.reload(cx); this.sync(cx, true); } : null,
+      onRefresh: repo && provider ? (cx) => {
+        this.account = null; this.accountAt = 0; this.accountForce = true;
+        if (!this.loadedOnce) this.reload(cx);
+        this.sync(cx, true);
+      } : null,
     });
     const frame = (body) => v_flex().id("issues").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .child(header).when(Boolean(body), (e) => e.child(body));

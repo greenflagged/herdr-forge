@@ -3,7 +3,7 @@
 Forge puts your GitLab or GitHub project inside [Herdr](https://herdr.dev). You get open merge requests
 (or pull requests) you can merge yourself or hand to an AI agent, CI pipelines or workflow runs and runners, milestones, a velocity chart, and a full issue
 browser that starts agents on issues. Press **ctrl-shift-f** and the whole window turns into Forge
-for the repo of the terminal you're in.
+for your remembered project (the focused terminal's repo on the first open).
 
 GitLab (gitlab.com and self-hosted) and GitHub (github.com and Enterprise Server). The
 panels use each forge's own words: MRs and pipelines on GitLab, PRs and workflow runs on GitHub.
@@ -14,8 +14,9 @@ See [On GitHub](#on-github) for what differs.
 ## Forge
 
 **ctrl-shift-f** switches the whole Herdr window to Forge, with every panel for the repo of the
-focused terminal. Press it again, or **Back** in the bar, to return to your layout. **Other project**
-in the bar opens the repo of another space.
+focused terminal on the first open. After that it restores your last project, across reopens and
+app restarts, even if another terminal has focus. Press it again, or **Back** in the bar, to return
+to your layout. **Other project** in the bar changes this remembered choice to another space's repo.
 
 Click a panel's header to collapse it in place, and again to bring it back. Hover the header for ⧉,
 which opens the panel as a pane beside your terminals, and ↗, which detaches it into its own window.
@@ -23,6 +24,14 @@ Herdr remembers the sizes you choose.
 
 You can also put any panel in your own layout (see [Panels in your layout](#panels-in-your-layout)).
 Panels there work the same way.
+
+**Panels** in Forge's top bar lets you add or remove Pull requests, Milestones, Velocity,
+Workflow runs, Runners, and Issues (using GitLab's names on GitLab). Tick a panel to add it,
+untick it to remove it. Your selection is remembered per project and machine across restarts.
+Removing deletes that panel's layout block and stops its timers and polling, rather than just
+hiding it. Requests already running may finish. Remaining panels (or independent copies you
+opened in other panes/windows) still fetch the data they need. Cached data and Issues filters
+are retained when you add a panel back. ↑/↓ and Enter/Space work in the Panels menu; Esc closes it.
 
 ## Merge requests and CI
 
@@ -162,6 +171,13 @@ Every issue in the project, cached on your machine so filtering and search are i
 
 - Filters come from your scoped labels (`priority::high`, `type::bug`, `team::web`), with counts.
 - Search titles and descriptions, or jump to `#123`. Use ↑/↓ or j/k to move, `/` to search.
+- In **People**, choose **Everyone**, **Assigned to me**, or **Created by me**. The personal
+  filters use your signed-in account on this project's forge and combine with the other filters.
+  State, search, sort, labels, milestones, and People are remembered per project and machine
+  across layout changes and app restarts. People sits beside the state and sort controls.
+- Reopening Issues reads its first page and metadata from the private SQLite cache in one local call.
+  Network syncs run only when stale (5 minutes focused, 15 minutes away), or when you press ↻.
+  An unfinished initial sync continues in the background; changing filters never refetches issues.
 - Change priority, type, milestone and the other scoped labels from dropdowns, add or remove labels,
   comment, close and reopen. Every change goes to the forge first.
 - Your own buttons on each issue (below).

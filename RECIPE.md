@@ -2,7 +2,7 @@
 
 Your GitLab or GitHub project inside Herdr, with buttons that hand merge requests and issues to an
 AI agent. Press ctrl-shift-f and the whole window becomes Forge: every panel for the
-repo of the focused terminal:
+remembered project (the focused terminal's repo on first open):
 
 - open merge requests (pull requests on GitHub), which you can merge or hand to an agent
 - pipelines (workflow runs on GitHub)
@@ -27,6 +27,7 @@ stages on GitLab; PRs, `#iid`, workflow runs and workflows on GitHub.
   - The host, when it isn't gitlab.com (11 px `dim`).
   - A pill with the machine ("this computer" when local).
   - "Other project ▾": a list of the open spaces, each with its machine; picking one opens its repo.
+  - "Panels N/6 ▾": checkboxes for each dashboard panel. Unticking removes its block; ticking adds it back.
   - On the right, "ctrl-shift-f" in 11 px `dim` and a "Back to ‹layout›" button.
 - Below the bar, a row: a 360 px column with MRs, Milestones and Velocity (330 px tall); a 340 px
   column with CI over Runners (2:1); and Issues filling the rest. 1 px `border` dividers sit between
@@ -61,24 +62,31 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
   Hovering a bar shows that bucket in every row. A 22 px footer: branch, totals.
 - **Issues**: three resizable columns. Filters (210 px, `chrome`): one section per scoped label with
   counts and priority dots, then Milestone and Labels. The list: a search box, Open / Closed / All, a
-  sort switch, then 30 px rows (priority dot, `#iid`, title, chips, age) and a footer ("42 of 293").
+   sort switch and People dropdown (Everyone / Assigned to me / Created by me) on the same row,
+   then 30 px rows (priority dot, `#iid`, title, chips, age) and a footer ("42 of 293").
   The detail (480 px): title with ↗, state and dates, your buttons, then Fields as dropdowns (one per
   scope, plus Milestone), Labels, Merge requests, the description as markdown, comments and a comment
   box.
 
 ## How it behaves
 
-- ctrl-shift-f switches the window to the Forge layout for the focused terminal's repo, and back to
+- ctrl-shift-f switches the window to the Forge layout for the remembered project, and back to
   the layout you came from. The terminal's origin remote names the project and its forge, the
   terminal's machine runs `glab` (GitLab) or `gh` (GitHub), and the terminal's checkout is where
   agents start. Outside a repo, Forge opens the last
-  project. The layout file is only rewritten when the project changes.
+  project. The first open uses the focused terminal; later opens restore the saved choice.
+  Project and panel selections survive restarts. The layout is rewritten only when its content changes.
+- Panels are removed, not hidden: their views and timers stop. Empty columns disappear; all panels
+  can be removed and added back from the bar. Already-running requests may finish, and independent
+  copies opened elsewhere remain independent. ↑/↓ and Enter/Space work in the menu; Esc closes it.
 - Clicking a header collapses the panel in place. In a column it shrinks to its header. In a row it
   shrinks to a 34 px strip with the title's letters stacked. Collapsed and hidden panels stop polling.
 - Panels poll only while on screen: MRs every 60 s, CI every 10 s while a recent pipeline runs and the
   window is focused (else 60 s), runners 20 s / 60 s, milestones 5 min, velocity 5 min (commits) and
-  15 min (forge), issues 60 s focused / 5 min away. The first read after starting shows the cache at
-  once.
+  15 min (forge), issues 5 min focused / 15 min away. Issues startup reads cached rows, metadata and
+  sync age in one local call, without refetching issues. ↻ forces a refresh.
+- Issues remembers state, search, sort, label/milestone filters and People per project and machine.
+  Personal filters use the signed-in account and apply before counts, sorting and pagination.
 - Merge asks "Merge into main?" and merges only the commit shown. It hides while CI runs or an agent
   on the MR is working. On GitHub it uses the first method the repository allows (merge commit,
   squash, rebase).
@@ -149,6 +157,8 @@ a pane) and ↗ (detach into a window). A detached window shows ↙ (dock).
 - ctrl-shift-f in a GitLab or GitHub repo's terminal switches to Forge for that project; pressing it again (or
   Back) returns to the previous layout. Other project opens another space's repo.
 - Each panel shows its data, and after a restart shows it at once from the cache.
+- Choose another project and personal filters, reopen Forge or restart: both choices are restored.
+- Remove a panel: its block is absent, not hidden; add it back: cached data and filters remain.
 - Clicking a header collapses it; clicking again restores its size.
 - A filter click in Issues narrows the list and the counts; a priority change shows at once and on
   the forge.

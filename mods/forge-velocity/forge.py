@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.3+61d9af3e8127"
+VERSION = "0.1.4+92a6ae35280d"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -1840,12 +1840,19 @@ class Project:
 
     def query(self, o):
         """One page of the filtered, sorted list, plus counts for the sidebar.
-        o: {state, q, picked: {group: [values]}, sort, offset, limit, sep?}"""
+        o: {state, q, picked: {group: [values]}, sort, offset, limit, sep?, person?, user?}"""
         if o.get("sep") and o["sep"] != self.sep:
             self.sep = o["sep"]
             self.set_meta("scope_sep", self.sep)
             self.db.commit()
         state, q = o.get("state", "opened"), (o.get("q") or "").strip()
+        person = o.get("person", "all")
+        if person not in ("all", "assigned", "created"):
+            raise RuntimeError("unknown people filter")
+        user = o.get("user")
+        if person != "all" and (not isinstance(user, str) or not user.strip()):
+            raise RuntimeError("a people filter needs the signed-in account")
+        user = user.strip().casefold() if isinstance(user, str) else ""
         picked = {g: set(v) for g, v in (o.get("picked") or {}).items() if v}
         sort, offset, limit = o.get("sort", "priority"), o.get("offset", 0), o.get("limit", 150)
         tri = {iid: (rank, prio, status, locked) for iid, rank, prio, status, locked in
@@ -1855,9 +1862,13 @@ class Project:
         words = q.lower().split()
         hits = set(self.search(q)) if q and not m and len(q) >= 3 else None
         base = []
-        for iid, title, st, labels, milestone, ca, ua, reqs in self.db.execute(
-                "SELECT iid, title, state, labels, milestone, created_at, updated_at, requests FROM issues"):
+        for iid, title, st, labels, milestone, ca, ua, reqs, author, assignees in self.db.execute(
+                "SELECT iid, title, state, labels, milestone, created_at, updated_at, requests, author, assignees FROM issues"):
             if state != "all" and st != state:
+                continue
+            if person == "created" and (author or "").casefold() != user:
+                continue
+            if person == "assigned" and user not in {a.casefold() for a in json.loads(assignees) or []}:
                 continue
             if q:
                 if m:
@@ -1990,7 +2001,25 @@ class Project:
         return self.show(iid, refetch=True)
 
     def labels_meta(self):
-        return {"labels": self.meta("labels", []), "milestones": self.meta("milestones", []), "sep": self.sep}
+        # Startup reads only local state. The UI can paint cached rows and decide
+        # whether a sync is due without refetching issues or looking up the login.
+        account = self.peek("whoami")
+        return {"labels": self.meta("labels", []), "milestones": self.meta("milestones", []), "sep": self.sep,
+                "now": time.time(), "last_sync": self.meta("last_sync", 0), "more": self.meta("sync_more", False),
+                "triage_at": self.db.execute("SELECT max(at) FROM triage").fetchone()[0] or 0,
+                "triage_run": self.meta("triage_run"), "user": account[0] if account else None,
+                "user_at": account[1] if account else 0}
+
+    def bootstrap(self, options):
+        """A warm open in one local call, with no forge requests. Private issue
+        content stays in this owner's SQLite cache, never Herdr's shared.json."""
+        meta = self.labels_meta()
+        options = dict(options)
+        if options.get("person") in ("assigned", "created"):
+            if not meta["user"] or time.time() - meta["user_at"] >= 3600:
+                return {**meta, "list": None}  # the UI resolves identity, then queries
+            options["user"] = meta["user"]
+        return {**meta, "list": self.query(options)}
 
     # -- triage (optional; the triage-issues skill drives these) --
 
@@ -2248,6 +2277,7 @@ def main(argv):
         "velocity": lambda: p.velocity(age(0), force(1), a[2], int(a[3]), a[4]),
         "sync": lambda: p.sync(float(a[0]) if a else 0, force(1)),
         "meta": p.labels_meta,
+        "bootstrap": lambda: p.bootstrap(json.loads(a[0]) if a else {}),
         "query": lambda: p.query(json.loads(a[0]) if a else {}),
         "show": lambda: p.show(int(a[0])),
         "search": lambda: {"iids": p.search(a[0])},

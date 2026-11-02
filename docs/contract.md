@@ -141,6 +141,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `commits <top> <ref> <12w\|30d> <nowMs> <tz> <force> [quick]` | `{n, size, start, edges, at, fetched, error, row: Row, total}`: run on the repo's machine. No maxAge: it re-reads git every 5 min and fetches an `origin/*` ref every 15; an empty ref means HEAD. `quick` 1: answer from the cache without git (a local `git log` when nothing is cached, never a fetch), for a panel's first draw |
 | `sync P <since> <force>` | `{now, last_sync, error, changed, more, triage_at, triage_run}`: `changed` counts issues written after `since` (an issue the forge sends again unchanged isn't rewritten) |
 | `meta P` | `{labels: [{name, color, description}], milestones: [{id, title, due}], sep}` |
+| `bootstrap P <json>` | Local-only startup: `meta` fields plus `list` (`query`'s answer). Personal filters use the cached login; `list: null` means identity needs resolving before querying. No forge requests |
 | `query P <json>` | `{rows, offset, matched, total, counts, scopes, sep}` (below) |
 | `search P <text>` | `{iids}`: full-text matches, best first |
 | `show P <iid>` | `{iid, issue: Issue, description, notes: [Note], requests: [LinkedRequest], launches, triage, error}` |
@@ -330,7 +331,12 @@ mixes PRs into issues). Mods must cope with the nulls:
 ### Issue queries
 
 `query` takes `{state: "opened"|"closed"|"all", q, picked: {group: [values]}, sort:
-"priority"|"updated"|"created"|"triage", offset, limit, sep?}` and answers one page:
+"priority"|"updated"|"created"|"triage", offset, limit, sep?, person?, user?}` and answers one page:
+
+- `person`: `all` (default), `assigned` or `created`. The latter two require `user`, the
+  login from `whoami` on the project's host and machine. Matching is case-insensitive;
+  a missing login fails rather than silently returning everyone's issues. This filter is
+  applied before facet counts, sorting and pagination, together with state and search.
 
 - `rows`: `[iid, title, state, priority, type, requests, updated_ms, proposedPriority, launched]`.
 - `counts`: `{group: {value: n}}` for the sidebar. Groups: `scope:<name>` for every scoped
@@ -378,8 +384,17 @@ Mods talk through Herdr's `shared(key)` / `setShared(key, value)`:
 | `forge-issues.actions` | any mod | `{owner: {at, actions: [Action]}}`: extra buttons on issues |
 | `forge-issues.selected` | `forge-issues` | the open issue's action fields (`issueItem`), or null |
 | `forge-issues.event` | `forge-issues` | `{type, iid, repo, host, at}` after each change it writes; `type: "action"` adds `action` (its id); a change to many issues at once (accept-all) has `iid: null` and `iids` |
+| `forge-issues.view:<project key>` | `forge-issues` | Saved state, sort, search, facet picks and People filter; the key includes machine, provider, host and repository |
+| `forge-window.panels:<project key>` | `forge-window` | Names of enabled dashboard panels; omitted blocks have no view, timers or polling; preferences include machine, provider, host and repository |
 
 Setting shared state redraws every mod: write only on real changes.
+
+Issues restores its saved choices, then reads its first page and metadata from private SQLite
+with one local `bootstrap` call. No issue previews are stored in Herdr's shared state.
+`meta` adds `now`, `last_sync`, `more`, `triage_at`, `triage_run`,
+`user`, and `user_at` without making network calls. Only a stale view syncs issues (5 minutes
+focused, 15 minutes away); incomplete syncs continue promptly. ↻ forces a sync. Personal
+queries reuse the cached login for up to an hour, with ↻ also refreshing that login.
 
 ## Stable for agents and other packages
 

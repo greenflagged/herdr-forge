@@ -660,6 +660,68 @@ class Forge(unittest.TestCase):
         self.assertEqual(out["counts"]["scope:priority"], {"high": 1, "low": 1})
         self.assertEqual(self.run_forge("meta", *P)["sep"], ": ", "the separator is remembered")
 
+    def test_startup_metadata_reads_sync_age_and_login_without_network(self):
+        cold = self.run_forge("meta", *P)
+        self.assertEqual((cold["last_sync"], cold["more"], cold["user"]), (0, False, None))
+        self.assertEqual(self.calls(), [], "opening metadata on an empty cache makes no forge calls")
+        synced = self.sync_issues([issue(1)])
+        self.routes([[r"api --hostname gitlab.com user$", {"out": {"username": "sam"}}]])
+        self.run_forge("whoami", *P, 3600, 0)
+        before = self.calls()
+        meta = self.run_forge("meta", *P)
+        self.assertEqual(meta["last_sync"], synced["last_sync"])
+        self.assertEqual(meta["user"], "sam")
+        self.assertGreater(meta["user_at"], 0)
+        self.assertFalse(meta["more"])
+        self.run_forge("query", *P, '{"person":"assigned","user":"sam"}')
+        self.assertEqual(self.calls(), before, "warm startup and filtering read SQLite only")
+        cached = self.run_forge("bootstrap", *P, '{"person":"created"}')
+        self.assertEqual(cached["user"], "sam")
+        self.assertEqual(cached["list"]["rows"], [])
+        everyone = self.run_forge("bootstrap", *P, '{}')
+        self.assertEqual(everyone["list"]["rows"][0][0], 1)
+        self.assertEqual(self.calls(), before, "bootstrap makes no forge calls")
+
+    def test_bootstrap_personal_filters_require_cached_identity_without_network(self):
+        for person in ("assigned", "created"):
+            out = self.run_forge("bootstrap", *P, json.dumps({"person": person}))
+            self.assertIsNone(out["list"], "never return everyone's issues while identity is unknown")
+        self.assertEqual(self.calls(), [])
+
+    def test_query_person_filters_compose_before_counts_sort_and_pagination(self):
+        self.sync_issues([
+            issue(1, ["priority::high", "bug"], title="Login breaks", author={"username": "Sam"},
+                  assignees=[{"username": "sam"}, {"username": "bo"}]),
+            issue(2, ["priority::low", "bug"], title="Login flow", author={"username": "bo"},
+                  assignees=[{"username": "SAM"}]),
+            issue(3, ["priority::high"], title="Login tests", author={"username": "sam"}),
+            issue(4, state="closed", author={"username": "sam"}, assignees=[{"username": "sam"}]),
+            issue(5, author=None),
+        ])
+        query = lambda **o: self.run_forge("query", *P, json.dumps(o))
+        assigned = query(person="assigned", user=" sam ")
+        self.assertEqual([r[0] for r in assigned["rows"]], [1, 2])
+        self.assertEqual((assigned["total"], assigned["matched"]), (2, 2))
+        self.assertEqual(assigned["counts"]["scope:priority"], {"high": 1, "low": 1})
+        created = query(person="created", user="SAM")
+        self.assertEqual([r[0] for r in created["rows"]], [1, 3])
+        narrowed = query(person="assigned", user="sam", q="login", picked={"scope:priority": ["low"], "labels": ["bug"]})
+        self.assertEqual([r[0] for r in narrowed["rows"]], [2])
+        page = query(person="assigned", user="sam", offset=1, limit=1)
+        self.assertEqual(([r[0] for r in page["rows"]], page["matched"]), ([2], 2))
+        self.assertEqual([r[0] for r in query(person="created", user="sam", state="closed")["rows"]], [4])
+        self.assertEqual(query(person="assigned", user="nobody")["rows"], [])
+        self.assertEqual(len(query()["rows"]), 4, "Everyone still includes unassigned and deleted-author issues")
+        self.assertIsNone(query(person="assigned", user="sam").get("error"), "filters use the cache without forge calls")
+
+    def test_query_person_filters_fail_closed_without_identity(self):
+        for person in ("assigned", "created"):
+            for user in (None, "", " ", 12):
+                out = self.run_forge("query", *P, json.dumps({"person": person, "user": user}))
+                self.assertIn("signed-in account", out["error"])
+                self.assertNotIn("rows", out)
+        self.assertIn("unknown people filter", self.run_forge("query", *P, '{"person":"other"}')["error"])
+
     def test_search_and_iid_lookup(self):
         self.sync_issues([issue(1, title="Login breaks"), issue(12, description="the checkout flow"), issue(3)])
         q = lambda s: [r[0] for r in self.run_forge("query", *P, json.dumps({"q": s, "sort": "created"}))["rows"]]

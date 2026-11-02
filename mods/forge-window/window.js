@@ -27,6 +27,39 @@ export function parseConfig(text) {
 
 export const projectKey = (p) => (p ? `${p.host}/${p.repo}` : "");
 
+export function panelSelectionKey(project) {
+  return `forge-window.panels:${JSON.stringify([project.on ?? null, project.provider, project.host?.toLowerCase(), project.repo])}`;
+}
+
+export function selectedPanels(project, config = {}, saved = null) {
+  if (Array.isArray(saved)) return PANELS.filter((p) => saved.includes(p.name)).map((p) => p.name);
+  const hidden = config.projects?.[projectKey(project)]?.hidden ?? config.hidden;
+  return PANELS.filter((p) => !Array.isArray(hidden) || !hidden.includes(p.name)).map((p) => p.name);
+}
+
+export function togglePanel(selected, name) {
+  if (!PANELS.some((p) => p.name === name)) return selected;
+  return PANELS.filter((p) => p.name === name ? !selected.includes(name) : selected.includes(p.name)).map((p) => p.name);
+}
+
+export function panelLabel(panel, provider) {
+  if (panel.name === "requests") return provider === "github" ? "Pull requests" : "Merge requests";
+  if (panel.name === "ci") return provider === "github" ? "Workflow runs" : "Pipelines";
+  return panel.label;
+}
+
+// The last project lives in Herdr's persisted shared state. Reopening Forge should
+// keep that choice, even when focus moved to a terminal in another repository.
+export function rememberedProject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.none
+    || !["gitlab", "github"].includes(value.provider)
+    || typeof value.host !== "string" || !value.host.trim()
+    || typeof value.repo !== "string" || !value.repo.trim()
+    || (value.on != null && typeof value.on !== "string")
+    || (value.folder != null && typeof value.folder !== "string")) return null;
+  return value;
+}
+
 // A project's settings: the file's entry for it over what was found from the terminal.
 export function withConfig(project, config) {
   const own = config?.projects?.[projectKey(project)] ?? {};
@@ -57,7 +90,7 @@ export function keptBlocks(layout) {
   return out;
 }
 
-export function forgeLayout(project, config = {}, kept = []) {
+export function forgeLayout(project, config = {}, kept = [], selected = selectedPanels(project, config)) {
   const own = config?.projects?.[projectKey(project)] ?? {};
   const base = { provider: project.provider, host: project.host, repo: project.repo, on: project.on ?? null };
   const block = (p, props) => ({
@@ -70,11 +103,11 @@ export function forgeLayout(project, config = {}, kept = []) {
   const propsOf = (p) => p.name === "velocity" ? { ...base, folder: project.folder ?? null, glabOn: base.on, forges: config.forges }
     : p.name === "requests" || p.name === "issues" ? { ...base, folder: project.folder ?? null } : base;
   const column = (id, side, px) => ({ id, type: "column", size: { px }, divider: { width: 1, color: "border" },
-    children: PANELS.filter((p) => p.side === side).map((p) => block(p, propsOf(p))) });
+    children: PANELS.filter((p) => p.side === side && selected.includes(p.name)).map((p) => block(p, propsOf(p))) });
   const row = [
     column("forge-left", "left", 360),
     column("forge-middle", "middle", 340),
-    ...PANELS.filter((p) => !p.side).map((p) => block(p, propsOf(p))),
+    ...PANELS.filter((p) => !p.side && selected.includes(p.name)).map((p) => block(p, propsOf(p))),
   ];
   const columns = new Map(row.filter((n) => n.type === "column").map((n) => [n.id, n]));
   const ids = new Set(row.flatMap((n) => [n.id, ...(n.children ?? []).map((c) => c.id)]));
@@ -83,10 +116,15 @@ export function forgeLayout(project, config = {}, kept = []) {
     ids.add(b.id);
     (columns.get(parent) ?? columns.get("forge-left")).children.push(b);
   }
+  // Remove empty columns as well as the panel blocks: removed views are destroyed,
+  // so their timers and GitHub polling stop rather than running in a hidden slot.
+  const visible = row.filter((n) => n.type !== "column" || n.children.length);
+  if (visible.length && !visible.some((n) => n.id === "forge-issues")) visible[visible.length - 1].size = { weight: 1 };
+  if (!visible.length) visible.push({ id: "forge-empty", type: "block", content: { mod: "forge-window", props: { empty: true } } });
   return {
     id: "root", type: "column", children: [
       { id: "forge-bar", type: "block", size: { px: 38 }, content: { mod: "forge-window", props: { bar: true } } },
-      { id: "forge-body", type: "row", divider: { width: 1, color: "border" }, children: row },
+      { id: "forge-body", type: "row", divider: { width: 1, color: "border" }, children: visible },
     ],
   };
 }

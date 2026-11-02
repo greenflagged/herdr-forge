@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseRemote, providerForHost } from "../shared/lib.js";
-import { PANELS, forgeLayout, keptBlocks, parseConfig, projectFrom, withConfig } from "../mods/forge-window/window.js";
+import { PANELS, forgeLayout, keptBlocks, parseConfig, projectFrom, withConfig, rememberedProject,
+  selectedPanels, togglePanel, panelSelectionKey, panelLabel } from "../mods/forge-window/window.js";
 
 const project = { provider: "gitlab", host: "gitlab.com", repo: "acme/shop", on: "mac", folder: "/src/shop" };
 const mods = (node) => node.content ? [node.content.mod] : (node.children ?? []).flatMap(mods);
@@ -61,4 +62,66 @@ test("projectFrom reads the focused repo", () => {
     { provider: "gitlab", host: "gitlab.com", repo: "acme/shop", on: "mac", folder: "/src/shop" });
   assert.equal(projectFrom({}, null, null, providerForHost), null, "not a repo");
   assert.ok(projectFrom({ top: "/x", url: "https://codeberg.org/a/b" }, parseRemote("https://codeberg.org/a/b"), null, providerForHost).none);
+});
+
+test("remembered projects retain the repository, host, machine and checkout", () => {
+  assert.equal(rememberedProject(project), project);
+  for (const provider of ["gitlab", "github"]) {
+    const saved = { ...project, provider };
+    assert.deepEqual(rememberedProject(JSON.parse(JSON.stringify(saved))), saved);
+  }
+  for (const bad of [null, [], "acme/shop", {}, { ...project, none: true }, { ...project, provider: "other" },
+    { ...project, repo: "" }, { ...project, host: null }, { ...project, on: 4 }, { ...project, folder: {} }]) {
+    assert.equal(rememberedProject(bad), null);
+  }
+});
+
+test("removing a panel removes its module entirely rather than hiding it", () => {
+  const all = PANELS.map((p) => p.name);
+  for (const panel of PANELS) {
+    const selected = togglePanel(all, panel.name);
+    const layout = forgeLayout(project, {}, [], selected);
+    assert.ok(!mods(layout).includes(panel.mod), panel.mod);
+    assert.ok(!JSON.stringify(layout).includes('"hidden":true'), "no hidden copy may keep polling");
+    for (const other of PANELS.filter((p) => p !== panel)) assert.ok(mods(layout).includes(other.mod), other.mod);
+    assert.deepEqual(togglePanel(selected, panel.name), all, "adding the panel back restores it in its normal position");
+  }
+});
+
+test("empty columns disappear and remaining panels fill the space", () => {
+  const issuesOnly = forgeLayout(project, {}, [], ["issues"]);
+  assert.deepEqual(issuesOnly.children[1].children.map((n) => n.id), ["forge-issues"]);
+  const ciOnly = forgeLayout(project, {}, [], ["ci"]);
+  assert.deepEqual(ciOnly.children[1].children.map((n) => n.id), ["forge-middle"]);
+  assert.deepEqual(ciOnly.children[1].children[0].size, { weight: 1 });
+});
+
+test("all panels can be removed without losing the controls to add them back", () => {
+  const empty = forgeLayout(project, {}, [], []);
+  assert.deepEqual(mods(empty), ["forge-window", "forge-window"], "no network-fetching panel stays mounted");
+  assert.equal(empty.children[0].content.props.bar, true);
+  assert.deepEqual(empty.children[1].children[0].content.props, { empty: true });
+  const restored = forgeLayout(project, {}, [], PANELS.map((p) => p.name));
+  assert.deepEqual(mods(restored), ["forge-window", ...PANELS.map((p) => p.mod)]);
+});
+
+test("panel selections override config defaults and stay isolated by project and machine", () => {
+  const all = PANELS.map((p) => p.name);
+  assert.deepEqual(selectedPanels(project, { hidden: ["runners"] }), all.filter((p) => p !== "runners"));
+  assert.deepEqual(selectedPanels(project, { hidden: ["runners"] }, all), all);
+  assert.deepEqual(selectedPanels(project, {}, []), []);
+  assert.deepEqual(selectedPanels(project, {}, ["issues", "unknown", "issues"]), ["issues"]);
+  assert.equal(panelSelectionKey(project), panelSelectionKey({ ...project }));
+  for (const patch of [{ repo: "acme/other" }, { host: "git.example.com" }, { on: null }, { provider: "github" }]) {
+    assert.notEqual(panelSelectionKey(project), panelSelectionKey({ ...project, ...patch }));
+  }
+  assert.equal(panelLabel(PANELS[0], "github"), "Pull requests");
+  assert.equal(panelLabel(PANELS[3], "github"), "Workflow runs");
+});
+
+test("custom blocks survive removal of every standard panel", () => {
+  const custom = { id: "custom", type: "block", content: { mod: "my-panel" } };
+  const layout = forgeLayout(project, {}, [{ parent: "forge-middle", block: custom }], []);
+  assert.deepEqual(mods(layout), ["forge-window", "my-panel"]);
+  assert.equal(layout.children[1].children[0].id, "forge-middle");
 });

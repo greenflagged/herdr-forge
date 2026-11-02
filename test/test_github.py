@@ -430,6 +430,20 @@ class GitHub(unittest.TestCase):
                          [(5, "merged", False), (6, "opened", True), (8, "closed", False)])
         self.assertEqual(out["notes"], [{"id": 1, "author": "di", "body": "hi[2J", "at_ms": NOW // 1000 * 1000}])
 
+    def test_query_my_issues_matches_github_logins_and_multiple_assignees(self):
+        self.sync_issues([
+            issue(1, ["bug"], author={"login": "Sam"}, assignees={"nodes": [{"login": "bo"}, {"login": "sam"}]}),
+            issue(2, author={"login": "sam"}),
+            issue(3, author={"login": "bo"}, assignees={"nodes": [{"login": "SAM"}]}),
+            issue(4, author=None),
+        ])
+        query = lambda **o: self.run_forge("query", *P, json.dumps(o))
+        self.assertEqual([r[0] for r in query(person="assigned", user="sam")["rows"]], [1, 3])
+        self.assertEqual([r[0] for r in query(person="created", user="sam")["rows"]], [1, 2])
+        self.assertEqual([r[0] for r in query(person="assigned", user="sam", picked={"labels": ["bug"]})["rows"]], [1])
+        self.assertEqual(query(person="created", user="nobody")["total"], 0)
+        self.assertEqual(len(query()["rows"]), 4)
+
     def test_update_translates_fields(self):
         self.sync_issues([issue(1, ["priority: low"])])
         self.routes([[r"-X (POST|DELETE|PATCH)", {"out": []}],
@@ -504,7 +518,15 @@ class GitHub(unittest.TestCase):
         self.assertIn("owner/name", self.run_forge("requests", "github", "github.com", "a/b/c", 60, 0)["error"])
 
     def test_missing_gh_is_reported(self):
-        out = self.run_forge("requests", *P, 60, 0, HERDR_FORGE_BIN=self.home, PATH=self.home)
+        # Restrict the module's actual search PATH, including its Homebrew fallbacks.
+        # Changing the subprocess PATH alone cannot hide /opt/homebrew/bin/gh.
+        import importlib.util
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("forge_missing_gh", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with patch.object(module, "HOME", self.home), patch.dict(module.ENV, {"PATH": self.home}):
+            out = module.main(["requests", *P, "60", "0"])
         self.assertTrue(out.get("nocli"))
         self.assertIn("gh isn't installed", out["error"])
 

@@ -3,6 +3,7 @@
 
 export const PRIORITIES = ["blocker", "critical", "high", "medium", "low"];
 export const STATES = [{ id: "opened", label: "Open" }, { id: "closed", label: "Closed" }, { id: "all", label: "All" }];
+export const PEOPLE = [{ id: "all", label: "Everyone" }, { id: "assigned", label: "Assigned to me" }, { id: "created", label: "Created by me" }];
 const SORTS = [
   { id: "priority", label: "Priority" },
   { id: "updated", label: "Updated" },
@@ -14,6 +15,17 @@ export const DEFAULT_SEP = { gitlab: "::", github: ": " };
 export const TRIAGE_DEFAULTS = { agent: "claude", tab: "triage", task: "/triage-issues {provider} {host} {repo}" };
 // The order the triage facet lists its values in.
 export const TRIAGE_ORDER = ["proposed change", "locked", "ranked", "(none)"];
+
+// Shared state, unlike a mod copy's localStorage, follows a project across layouts,
+// detached panes and app restarts. Machines and hosts must never share preferences/data.
+export function projectStateKey(project) {
+  return JSON.stringify([project.on ?? null, project.provider, project.host?.toLowerCase(), project.repo?.toLowerCase()]);
+}
+
+export const SYNC_FOCUSED = 5 * 60000, SYNC_AWAY = 15 * 60000;
+export function syncDue(lastPoll, more, active, now = Date.now()) {
+  return more || now - lastPoll >= (active ? SYNC_FOCUSED : SYNC_AWAY);
+}
 
 // The sorts on offer: "Triage rank" only with triage on.
 export function sorts(triageOn) {
@@ -122,7 +134,7 @@ export function togglePick(picked, group, value) {
   return { ...picked, [group]: vals.includes(value) ? vals.filter((v) => v !== value) : [...vals, value] };
 }
 
-// props.view, checked: { state, sort, picked, q } with anything malformed at its default.
+// props.view, checked: { state, sort, picked, q, person } with anything malformed at its default.
 // picked keeps only groups whose values are a list of strings (the layout is hand-written).
 export function startView(view) {
   const v = view && typeof view === "object" && !Array.isArray(view) ? view : {};
@@ -137,16 +149,23 @@ export function startView(view) {
     sort: SORTS.some((s) => s.id === v.sort) ? v.sort : "priority",
     picked,
     q: typeof v.q === "string" ? v.q : "",
+    person: PEOPLE.some((p) => p.id === v.person) ? v.person : "all",
   };
 }
 
 // The JSON `query` takes. `sep` only when props set one (passing it makes forge.py
 // remember it for the project).
-export function listQuery({ state, q, picked, sort, offset, limit, sep }) {
+export function listQuery({ state, q, picked, sort, offset, limit, sep, person = "all", user = null }) {
   const p = {};
   for (const [g, vals] of Object.entries(picked ?? {})) if (vals.length) p[g] = vals;
   const o = { state, q, picked: p, sort, offset, limit };
   if (sep) o.sep = sep;
+  if (person !== "all") {
+    if (!PEOPLE.some((p) => p.id === person)) throw new Error("Unknown people filter");
+    if (typeof user !== "string" || !user.trim()) throw new Error("Couldn't identify your signed-in account. Press ↻ to retry.");
+    o.person = person;
+    o.user = user.trim();
+  }
   return JSON.stringify(o);
 }
 
