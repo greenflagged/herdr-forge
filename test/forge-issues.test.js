@@ -128,15 +128,29 @@ test("usesPriority and isAgentAction", () => {
 });
 
 test("startView takes props.view, keeping only well-formed parts", () => {
-  const dflt = { state: "opened", sort: "priority", picked: {}, q: "" };
+  const dflt = { state: "opened", sort: "priority", picked: {}, q: "", person: "all" };
   assert.deepEqual(startView(undefined), dflt);
   assert.deepEqual(startView([1]), dflt);
   assert.deepEqual(startView({ state: "closed", sort: "updated", q: "login", picked: { "scope:type": ["bug"] } }),
-    { state: "closed", sort: "updated", picked: { "scope:type": ["bug"] }, q: "login" });
+    { state: "closed", sort: "updated", picked: { "scope:type": ["bug"] }, q: "login", person: "all" });
   assert.deepEqual(startView({ state: "nope", sort: 3, q: 5 }), dflt);
   // picked: only lists of strings survive (a string would be spread into letters, a number breaks the query).
   assert.deepEqual(startView({ picked: { a: "bug", b: [1], c: ["x", null], d: ["ok"], e: null } }).picked, { d: ["ok"] });
   assert.deepEqual(startView({ picked: ["bug"] }).picked, {});
+  for (const person of ["assigned", "created"]) assert.equal(startView({ person }).person, person);
+  for (const person of ["someone", null, 1]) assert.equal(startView({ person }).person, "all");
+});
+
+test("personal queries require a resolved account; Everyone needs none", () => {
+  const options = { state: "opened", q: "login", picked: { labels: ["bug"] }, sort: "updated", offset: 150, limit: 150 };
+  for (const person of ["assigned", "created"]) {
+    assert.deepEqual(JSON.parse(listQuery({ ...options, person, user: "  Sam  " })), { ...options, person, user: "Sam" });
+    for (const user of [null, undefined, "", "  ", 42]) {
+      assert.throws(() => listQuery({ ...options, person, user }), /signed-in account/);
+    }
+  }
+  assert.deepEqual(JSON.parse(listQuery({ ...options, person: "all" })), options);
+  assert.throws(() => listQuery({ person: "nope", user: "sam" }), /Unknown people filter/);
 });
 
 test("issue writes go one at a time, and triage is recorded only after the write", () => {
