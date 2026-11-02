@@ -1,5 +1,5 @@
 """forge.py's GitHub provider against a fake gh, in a throwaway HOME."""
-import json, os, subprocess, sys, tempfile, time, unittest
+import json, os, sqlite3, subprocess, sys, tempfile, time, unittest
 
 from test_forge import FAKES, NOW, SCRIPT, iso
 
@@ -43,6 +43,20 @@ def job(i, **kw):
             "started_at": iso(NOW - 90000), "completed_at": iso(NOW), "created_at": iso(NOW - 100000),
             "html_url": f"{URL}/actions/runs/1/job/{i}", "labels": ["ubuntu-latest"], "runner_id": None,
             "runner_name": None, **kw}
+
+
+def gdep(i, sha, at, env="production"):
+    return {"id": i, "sha": sha, "ref": "main", "environment": env, "created_at": iso(at)}
+
+
+def status(state, at):
+    return {"state": state, "created_at": iso(at)}
+
+
+GENVS = r"repos/acme/shop/environments\?per_page=100$"
+ALL_DEPS = r"repos/acme/shop/deployments\?per_page=100$"
+PDEPS = r"deployments\?environment=production&per_page=10$"
+PROD_ONLY = [[GENVS, {"out": {"total_count": 1, "environments": [{"name": "production"}]}}], [ALL_DEPS, {"out": []}]]
 
 
 class GitHub(unittest.TestCase):
@@ -152,6 +166,116 @@ class GitHub(unittest.TestCase):
         self.routes([[r"-X PUT", {"err": "gh: Pull Request is not mergeable (HTTP 405)"}], [r"mergeCommitAllowed", repo(mergeCommitAllowed=True)]])
         self.assertIn("not mergeable", self.run_forge("merge", *P, 7, "sha7")["error"])
         self.assertFalse(any("enablePullRequestAutoMerge" in c for c in self.calls()))
+
+    # -- deployments --
+
+    def merged_cache(self, *rows, extra=()):
+        """Caches `merged` with (number, merge oid, merged_ms) rows."""
+        self.routes([[r"pullRequests\(states:MERGED", repo(pullRequests=conn([
+            {**pr(n), "mergedAt": iso(at), "mergeCommit": {"oid": oid, "statusCheckRollup": None}} for n, oid, at in rows]))],
+            *extra])
+        self.assertIsNone(self.run_forge("merged", *P, 600, 1)["error"])
+
+    def test_deployment_statuses_say_which_deployments_count(self):
+        now = time.time() * 1000
+        self.merged_cache((1, "m1", now - 3 * 3600000), extra=[*PROD_ONLY,
+            [PDEPS, {"out": [gdep(5, "d5", now - 3600000), gdep(6, "d6", now - 3500000), gdep(7, "d7", now - 3400000)]}],
+            [r"deployments/5/statuses", {"out": [status("inactive", now - 60000), status("success", now - 3000000),
+                                                  status("in_progress", now - 3300000)]}],
+            [r"deployments/6/statuses", {"out": [status("failure", now - 3000000)]}],
+            [r"deployments/7/statuses", {"out": [status("in_progress", now - 3000000)]}],
+            [r"compare/m1\.\.\.d5\?per_page=1", {"out": {"status": "ahead"}}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertIsNone(out["error"])
+        self.assertEqual((out["environment"], out["deploys"]), ("production", True))
+        self.assertEqual(out["url"], f"{URL}/deployments/activity_log?environments_filter=production")
+        self.assertEqual(out["live"], {"m1": {"sha": "d5", "at_ms": int((now - 3000000) // 1000 * 1000)}},
+                         "a superseded success still counts, from when it succeeded")
+        self.assertEqual(out["latest"]["sha"], "d5", "the newest successful one")
+        self.assertFalse(any("compare/m1...d6" in c or "compare/m1...d7" in c for c in self.calls()))
+        n = len(self.calls())
+        self.run_forge("deployments", *P, 0, 0)
+        asked = [c for c in self.calls()[n:] if "statuses" in c]
+        self.assertEqual(len(asked), 1, "settled ones, failed included, aren't asked again")
+        self.assertIn("deployments/7/statuses", asked[0])
+
+    def test_a_deployment_with_no_outcome_after_a_day_is_asked_hourly(self):
+        now = time.time() * 1000
+        routes = [*PROD_ONLY, [PDEPS, {"out": [gdep(8, "m1", now - 2 * DAY), gdep(9, "d9", now - 2 * DAY + 1000)]}],
+                  [r"deployments/8/statuses", {"out": [status("waiting", now - 2 * DAY)]}],
+                  [r"deployments/9/statuses", {"out": []}]]
+        self.merged_cache((1, "m1", now - 3 * DAY), extra=routes)
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["live"], out["latest"]), ({}, None))
+        n = len(self.calls())
+        self.run_forge("deployments", *P, 0, 0)
+        self.assertFalse(any("statuses" in c for c in self.calls()[n:]), "not again within the hour")
+        db = sqlite3.connect(os.path.join(self.home, ".local/share/herdr-forge/github.com/acme__shop.db"))
+        self.addCleanup(db.close)
+        k, raw = db.execute("SELECT k, json FROM cache WHERE k LIKE 'deployments:production@%'").fetchone()
+        data = json.loads(raw)
+        self.assertEqual(sorted(data["_seen"]), ["8", "9"])
+        data["_seen"] = {i: {"next": 0} for i in data["_seen"]}
+        db.execute("UPDATE cache SET json=? WHERE k=?", (json.dumps(data), k))
+        db.commit()
+        self.routes([*routes[:3], [r"deployments/8/statuses", {"out": [status("success", now - 60000)]}],
+                     [r"deployments/9/statuses", {"out": []}]])
+        out = self.run_forge("deployments", *P, 0, 0)
+        self.assertIn("m1", out["live"], "a late approval still counts")
+
+    def test_compare_says_whether_a_deployment_holds_the_merge(self):
+        now = time.time() * 1000
+        rows = [(1, "m1", now - 4 * 3600000), (2, "m2", now - 3 * 3600000), (3, "m3", now - 2 * 3600000)]
+        self.merged_cache(*rows, extra=[*PROD_ONLY, [PDEPS, {"out": [gdep(5, "d5", now - 3600000)]}],
+            [r"deployments/5/statuses", {"out": [status("success", now - 3500000)]}],
+            [r"compare/m1\.\.\.d5", {"out": {"status": "identical"}}],
+            [r"compare/m2\.\.\.d5", {"out": {"status": "behind"}}],
+            [r"compare/m3\.\.\.d5", {"out": {"status": "diverged"}}]])
+        self.assertEqual(list(self.run_forge("deployments", *P, 60, 0)["live"]), ["m1"])
+
+    def test_environments_come_from_the_list_and_from_deployments(self):
+        now = time.time() * 1000
+        self.routes([[GENVS, {"out": {"total_count": 1, "environments": [{"name": "staging"}]}}],
+                     [ALL_DEPS, {"out": [gdep(1, "x", now, env="production")]}],
+                     # Oldest first: the order isn't relied on.
+                     [PDEPS, {"out": [gdep(3, "old", now - 7200000), gdep(4, "new", now - 60000)]}],
+                     [r"deployments/3/statuses", {"out": [status("success", now - 7000000)]}],
+                     [r"deployments/4/statuses", {"out": [status("success", now - 50000)]}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["environment"], out["latest"]["sha"]), ("production", "new"))
+        self.assertFalse(any("environments/production" in c for c in self.calls()), "already known")
+
+    def test_a_long_environment_list_looks_production_up_by_name(self):
+        now = time.time() * 1000
+        listed = [[GENVS, {"out": {"total_count": 150, "environments": [{"name": "staging"}]}}], [ALL_DEPS, {"out": []}]]
+        self.routes([*listed, [r"environments/production$", {"out": {"name": "production"}}],
+                     [PDEPS, {"out": [gdep(4, "d4", now - 60000)]}],
+                     [r"deployments/4/statuses", {"out": [status("success", now - 50000)]}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["environment"], out["deploys"]), ("production", True))
+        self.tmp.cleanup(); self.setUp()
+        self.routes([*listed, [r"environments/(production|prod|live)$", {"err": "gh: Not Found (HTTP 404)"}],
+                     [r"deployments\?environment=\w+&per_page=1$", {"out": []}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["environment"], out["deploys"]), (None, None), "a capped list never says no deploy step")
+        self.assertIn("forge.json", out["error"])
+        self.tmp.cleanup(); self.setUp()
+        # Not capped, and nothing production-like: no deploy step.
+        self.routes([[GENVS, {"out": {"total_count": 1, "environments": [{"name": "staging"}]}}], [ALL_DEPS, {"out": []}],
+                     [r"environments/(production|prod|live)$", {"err": "gh: Not Found (HTTP 404)"}],
+                     [r"deployments\?environment=\w+&per_page=1$", {"out": []}]])
+        self.assertEqual(self.run_forge("deployments", *P, 60, 0)["deploys"], False)
+
+    def test_a_pair_github_cant_compare_is_asked_again(self):
+        now = time.time() * 1000
+        self.merged_cache((1, "m1", now - 3 * 3600000), extra=[*PROD_ONLY, [PDEPS, {"out": [gdep(5, "d5", now - 3600000)]}],
+            [r"deployments/5/statuses", {"out": [status("success", now - 3500000)]}],
+            [r"compare/m1", {"err": "gh: Not Found (HTTP 404)"}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["error"], out["live"]), (None, {}))
+        n = len(self.calls())
+        self.run_forge("deployments", *P, 0, 0)
+        self.assertEqual(sum("compare/m1" in c for c in self.calls()[n:]), 1)
 
     # -- CI --
 

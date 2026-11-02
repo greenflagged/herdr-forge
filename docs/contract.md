@@ -127,6 +127,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 | `order P <maxAge> <force> [pattern]` | `{requests: {iid: Order}, targets: [{ref, folder, files}], at, error}`: for the open requests (the cached list); `targets`: the file names on each target branch in every folder where an open request has a path matching `pattern` |
 | `merged P <maxAge> <force>` | `{merged: [Merged], at, error}`: merged in the last 7 days, newest first |
 | `deployed P <sha> <text>` | `{ok}`: records that the deploy check said this merge commit is live. Final: `merged` returns it as `deployed` from then on, and the panel stops checking. Kept 90 days |
+| `deployments P <maxAge> <force> [environment]` | `Deployments` (below): whether the project deploys, and which merges in the cached `merged` answer a successful deployment includes. **Read `merged` first**: this never fetches it. `environment`: forge.json's `requests.deploy.environment`; empty picks the production-like one. Internal: Workstream reads it today |
 | `pipelines P <maxAge> <force>` | `{pipelines: [Pipeline], at, error}` |
 | `jobs P <pipelineId> <maxAge> <force>` | `{jobs: [Job], at, error}` |
 | `pipeline-act P <pipelineId> retry\|cancel` | `{ok}` |
@@ -157,6 +158,7 @@ const out = await this.forge(["pipelines", provider, host, repo, maxAge, force ?
 
 Writes (`merge`, `pipeline-act`, `runner-act`, `update`, `comment`, triage ones) answer `{error}` instead
 when they fail; nothing is cached for them. Writes drop the cached answers they change: `merge` drops requests, merged, order, CI and velocity;
+`merge` doesn't drop `deployments` (a merge changes no deployment, and `live` follows `merged`);
 `pipeline-act` drops CI and runners' jobs; `runner-act` marks runners stale (keeping the list, with the new `paused`); `update` drops milestones (`milestone-issues`
 too) and velocity; `comment` drops the issue's `issue-notes`. Whatever drops `milestone-items`
 drops `milestone-issues` too.
@@ -236,6 +238,21 @@ Merged     {iid, title, url, author, source, target, fork, head_sha, merge_sha, 
            fast-forward); ci: the newest pipeline for merge_sha on target (GitLab), the merge
            commit's rolled-up checks (GitHub, id null), null when none ran;
            deployed: {at_ms, text} once `deployed` recorded it, else null
+Deployments {environment, named, deploys, url, latest: {sha, ref, at_ms} | null,
+            live: {<merge_sha>: {sha, at_ms}}, partial, at, error}
+           environment: the one read: the named one, else production, prod or live (any case),
+           else GitLab's first of tier production; null when none. named: it came from the
+           argument. deploys: true when named, or when the environment's newest deployment of
+           any status is under 120 days old; false only from a complete read that found no
+           production-like environment, or one with no deployment in 120 days; null when it
+           can't tell (a read failed with nothing cached, or the environment list was cut
+           short with nothing production-like in it). Treat null as "can't tell", never as
+           false. latest: the newest successful deployment. live: the merges in the cached
+           `merged` answer (as of `at`) whose merge commit a successful deployment's commit
+           includes, with that deployment's commit and finish time; only merges still in
+           `merged`, so read it at least as often as `merged`. partial: stopped at the time
+           budget, so `live` may be missing some (or, with deploys null, the environment list
+           was cut short): call again soon. With nothing fetched yet: deploys null, live {}, at 0
 Pipeline   {id, iid, ref, sha, status, source, updated_ms, url, name?} ref: "main" or "!811";
            source: "request" (an MR/PR pipeline), else the forge's word (push, schedule, web...);
            name: the workflow's name (GitHub only)
@@ -316,6 +333,11 @@ mixes PRs into issues). Mods must cope with the nulls:
   Enterprise Server answers `error` on every poll. `issue-notes` is one GraphQL call; bot
   authors read `name[bot]`, as REST and `show` name them.
 - Velocity comes from search (`is:pr is:merged merged:>=...`), which stops at 1000 results.
+- `deployments`: a deployment's outcome is in its statuses, one call per deployment until it
+  has a `success`, `failure`, `error` or `inactive` one; one with none after a day is asked
+  hourly. A superseded deployment keeps its `success`. Environments come from the environments
+  list and from the recent deployments (one made through the API can name an environment with
+  no settings page). `url` is the environment's deployments page. List order isn't relied on.
 - GraphQL answers with some failed fields (an inaccessible cross-reference) keep what came
   back; `gh` exits 1 for them, so `run` hands back their output. `milestone-issues` and
   `issue-notes` are stricter. `milestone-issues` skips only an error inside a closing PR.

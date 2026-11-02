@@ -17,7 +17,7 @@
 # agents may rely on. Every mod folder carries a copy of this file stamped with its
 # version; edit shared/forge.py and run `npm run sync`.
 
-VERSION = "0.1.4+92a6ae35280d"
+VERSION = "0.1.5+933b3c0a5fc0"
 
 import bisect, json, os, random, re, sqlite3, subprocess, sys, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -53,6 +53,15 @@ MERGED_DAYS = 7                 # how far back `merged` looks
 MILESTONE_PAGES = 5             # pages of 100 issues `milestone-issues` walks, most recently updated first
 PEEK_MAX_AGE = 3600             # seconds a cached `requests` / `merged` answer may be joined into another,
                                 # and a complete `milestone-issues` answer kept over a partial one
+# `deployments`. A project still deploys while its environment's newest deployment (any status)
+# is this recent: longer than a quarterly release's 90-day gap, with a month to spare.
+DEPLOYS_RECENT = 120            # days
+DEPLOYMENTS_PAGE = 10           # newest deployments read per environment
+ENVIRONMENTS_EVERY = 3600       # seconds between reads of the environments list
+ENVIRONMENT_PAGES = 3           # pages of 100 GitLab environments read for the `tier` fallback
+UNSETTLED_HOURS = 24            # a GitHub deployment with no outcome after this is asked about...
+UNSETTLED_EVERY = 3600          # ...only this often (seconds)
+PROD_NAMES = ("production", "prod", "live")  # production-like environment names, in order of preference
 PRIORITIES = ["blocker", "critical", "high", "medium", "low"]
 START = time.time()
 
@@ -359,6 +368,21 @@ class Cli:
         """Whether a pending job that none of the project's runners can take is stuck."""
         return True
 
+    def contains(self, deploy_sha, merge_sha):
+        """Whether commit `deploy_sha` includes `merge_sha`. None: the forge couldn't compare
+        them (a commit it doesn't have, a fork's), so ask again next time rather than remember."""
+        if deploy_sha == merge_sha:
+            return True
+        try:
+            return self._contains(urllib.parse.quote(deploy_sha, safe=""), urllib.parse.quote(merge_sha, safe=""))
+        except (Busy, NoCli):
+            raise
+        except RuntimeError as e:
+            # The status code, not a bare "404": the error text can carry a sha.
+            if not re.search(r"HTTP (400|404|422)\b", str(e)):
+                raise
+            return None
+
     def whoami(self):
         """The account the CLI is logged in as on this host: the name Note.author gives its comments."""
         data = self.api("user")
@@ -481,6 +505,74 @@ class GitLab(Cli):
             r["ci"] = ci.get(r["target"], {}).get(r["merge_sha"])
         out.sort(key=lambda r: -r["merged_ms"])
         return out
+
+    # -- deployments --
+
+    def environments(self):
+        """{"envs": [{name, tier, url, available}], "stopped": None | "cap" | "budget"}: the
+        available environments. `stopped` says the listing was cut short. Review-app projects can
+        hold thousands, so the production-like names are looked up by name: the cap only limits
+        the `tier` fallback."""
+        envs, stopped = {}, None
+
+        def add(batch):
+            for e in batch or []:
+                if isinstance(e, dict) and isinstance(e.get("name"), str) and e["name"]:
+                    envs.setdefault(e["name"], {"name": e["name"], "tier": e.get("tier"), "available": True,
+                                                "url": f"{self.url}/-/environments/{e['id']}" if e.get("id") else None})
+
+        base = f"{self.project}/environments?states=available"
+        first = self.api(f"{base}&per_page=100&page=1") or []
+        add(first)
+        if len(first) < 100:
+            return {"envs": list(envs.values()), "stopped": None}
+        for n in PROD_NAMES:  # in order of preference: stop at the first one there
+            if n in {k.lower() for k in envs}:
+                break
+            if over_budget():
+                return {"envs": list(envs.values()), "stopped": "budget"}
+            add([e for e in self.api(f"{base}&name={urllib.parse.quote(n, safe='')}") or []
+                 if isinstance(e, dict) and e.get("name") == n])  # name= is exact; check anyway
+            if n in envs:
+                break
+        page = 2
+        while True:
+            if page > ENVIRONMENT_PAGES:
+                stopped = "cap"
+                break
+            if over_budget():
+                stopped = "budget"
+                break
+            batch = self.api(f"{base}&per_page=100&page={page}") or []
+            add(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return {"envs": list(envs.values()), "stopped": stopped}
+
+    def deployments(self, env, seen):
+        """(successful deployments newest first, newest deployment of any status in ms, seen,
+        listed ids, partial). GitLab says a deployment's outcome itself: `seen` isn't needed."""
+        base = f"{self.project}/deployments?environment={urllib.parse.quote(env, safe='')}&order_by=id&sort=desc"
+        deps = [{"id": d["id"], "sha": d["sha"], "ref": d.get("ref"),
+                 # A success's finished_at can be empty (seen live).
+                 "at_ms": ms(d.get("finished_at") or d.get("updated_at") or d.get("created_at"))}
+                for d in self.api(f"{base}&status=success&per_page={DEPLOYMENTS_PAGE}") or []
+                if isinstance(d, dict) and d.get("id") is not None and d.get("sha")]
+        deps.sort(key=lambda d: -d["id"])
+        newest = max((d["at_ms"] for d in deps if d["at_ms"]), default=None)
+        if newest is None or newest < time.time() * 1000 - DEPLOYS_RECENT * DAY:
+            # Failed or never-run (manual) deployments still say the project deploys. One call,
+            # not budget-checked: skipping it could read as "doesn't deploy".
+            for d in self.api(f"{base}&per_page=1") or []:
+                t = ms(d.get("updated_at") or d.get("created_at")) if isinstance(d, dict) else None
+                if t and (newest is None or t > newest):
+                    newest = t
+        return deps, newest, {}, [], False
+
+    def _contains(self, deploy_sha, merge_sha):
+        base = self.api(f"{self.project}/repository/merge_base?refs%5B%5D={merge_sha}&refs%5B%5D={deploy_sha}")
+        return isinstance(base, dict) and base.get("id") == urllib.parse.unquote(merge_sha)
 
     # -- CI --
 
@@ -946,6 +1038,92 @@ class GitHub(Cli):
         out.sort(key=lambda r: -r["merged_ms"])
         return out
 
+    # -- deployments --
+
+    def env_url(self, name):
+        # The page GitHub's own environment answer links to (html_url).
+        return f"{self.url}/deployments/activity_log?environments_filter={urllib.parse.quote(name, safe='')}"
+
+    def environments(self):
+        """As GitLab's. The names come from the environments list and from recent deployments:
+        a deployment made through the REST API can name an environment with no settings page.
+        GitHub has no tier."""
+        got = self.api(f"{self.repo}/environments?per_page=100") or {}
+        listed = [e["name"] for e in got.get("environments") or []
+                  if isinstance(e, dict) and isinstance(e.get("name"), str) and e["name"]]
+        stopped = "cap" if (got.get("total_count") or 0) > len(listed) else None
+        names = dict.fromkeys(listed)
+
+        def out(stop):
+            return {"envs": [{"name": n, "tier": None, "available": True, "url": self.env_url(n)} for n in names],
+                    "stopped": stop}
+
+        if over_budget():
+            return out("budget")
+        for d in self.api(f"{self.repo}/deployments?per_page=100") or []:
+            if isinstance(d, dict) and isinstance(d.get("environment"), str) and d["environment"]:
+                names.setdefault(d["environment"], None)
+        for n in PROD_NAMES:  # in order of preference: stop at the first one there
+            if n in {k.lower() for k in names}:
+                break
+            if over_budget():
+                return out("budget")
+            q = urllib.parse.quote(n, safe="")
+            try:
+                got = self.api(f"{self.repo}/environments/{q}")
+                if isinstance(got, dict) and isinstance(got.get("name"), str) and got["name"]:
+                    names.setdefault(got["name"], None)
+                    break
+            except (Busy, NoCli):
+                raise
+            except RuntimeError as err:
+                if not re.search(r"HTTP 404\b", str(err)):  # 404: no such environment
+                    raise
+            if over_budget():
+                return out("budget")
+            if self.api(f"{self.repo}/deployments?environment={q}&per_page=1"):
+                names.setdefault(n, None)
+                break
+        return out(stopped)
+
+    def deployments(self, env, seen):
+        """As GitLab's. A GitHub deployment's outcome is in its statuses, one call each, so
+        `seen` keeps each listed deployment's verdict: {"ok": true, "at_ms"} or {"ok": false}
+        once settled, {"next": epoch s} for one with no outcome after UNSETTLED_HOURS."""
+        listed = [d for d in self.api(f"{self.repo}/deployments?environment={urllib.parse.quote(env, safe='')}"
+                                      f"&per_page={DEPLOYMENTS_PAGE}") or []
+                  if isinstance(d, dict) and d.get("id") is not None]
+        listed.sort(key=lambda d: (d.get("created_at") or "", d["id"]), reverse=True)  # the order isn't documented
+        newest = max((ms(d.get("created_at")) or 0 for d in listed), default=None) or None
+        now, seen, partial = time.time(), dict(seen or {}), False
+        for d in listed:
+            k = str(d["id"])
+            v = seen.get(k) or {}
+            if "ok" in v or now < (v.get("next") or 0):
+                continue
+            if over_budget():
+                partial = True
+                break
+            sts = [s for s in self.api(f"{self.repo}/deployments/{d['id']}/statuses?per_page=100") or []
+                   if isinstance(s, dict)]
+            # A superseded deployment gains an inactive status; its success stays in the list.
+            ok = sorted(ms(s.get("created_at")) or 0 for s in sts if s.get("state") == "success")
+            if ok:
+                seen[k] = {"ok": True, "at_ms": ok[0] or ms(d.get("created_at"))}
+            elif any(s.get("state") in ("failure", "error", "inactive") for s in sts):
+                seen[k] = {"ok": False}
+            elif (ms(d.get("created_at")) or 0) < (now - UNSETTLED_HOURS * 3600) * 1000:
+                seen[k] = {"next": now + UNSETTLED_EVERY}  # waiting on a reviewer, say: ask hourly
+            else:
+                seen.pop(k, None)
+        deps = [{"id": d["id"], "sha": d["sha"], "ref": d.get("ref"), "at_ms": seen[str(d["id"])]["at_ms"]}
+                for d in listed if (seen.get(str(d["id"])) or {}).get("ok") and d.get("sha")]
+        return deps, newest, seen, [str(d["id"]) for d in listed], partial
+
+    def _contains(self, deploy_sha, merge_sha):
+        cmp = self.api(f"{self.repo}/compare/{merge_sha}...{deploy_sha}?per_page=1")
+        return isinstance(cmp, dict) and cmp.get("status") in ("ahead", "identical")
+
     # -- CI: workflow runs --
 
     def run_out(self, r):
@@ -1320,6 +1498,22 @@ class GitHub(Cli):
 PROVIDERS = {"gitlab": GitLab, "github": GitHub}
 
 
+def pick_environment(envs, named):
+    """The environment `deployments` reads: the named one, matched without case to the forge's
+    spelling (as given when the forge doesn't list it); else production, prod, live, then the
+    first GitLab environment of tier production. None: nothing production-like."""
+    by = {}
+    for e in envs or []:
+        by.setdefault(e["name"].lower(), e)
+    if named:
+        return by.get(named.lower()) or {"name": named, "tier": None, "url": None}
+    for n in PROD_NAMES:
+        if n in by:
+            return by[n]
+    tiered = sorted((e for e in envs or [] if e.get("tier") == "production"), key=lambda e: e["name"])
+    return tiered[0] if tiered else None
+
+
 # ---- one project's database ----
 # Rebuildable (dropped and fetched again if ever needed): cache, issues, issues_fts,
 # details, merged, closed. The person's own state (migrate with care): triage, launches,
@@ -1531,6 +1725,88 @@ class Project:
         self.db.execute("DELETE FROM deploys WHERE at < ?", (time.time() - 90 * 86400,))
         self.db.commit()
         return {"ok": True}
+
+    def deployments(self, max_age, force, environment=""):
+        """Whether the project deploys and which merges in the cached `merged` answer a
+        successful deployment includes (docs/contract.md "Deployments"). Read `merged` first.
+        environment: forge.json's name for it; empty picks the production-like one."""
+        if environment and not re.fullmatch(r"[^\x00-\x1f\x7f]{1,255}", environment):
+            raise RuntimeError(f"bad environment {environment!r}")
+        named = bool(environment)
+        blank = {"environment": None, "named": named, "deploys": None, "url": None, "latest": None, "live": {},
+                 "partial": False}
+        # Hourly, unless the last listing stopped at the time budget: then finish it soon.
+        old = self.peek("environments")
+        cut = bool(old and isinstance(old[0], dict) and old[0].get("stopped") == "budget")
+        envs, env_at, env_err = self.cached("environments", max_age if max_age < 0 or cut else max(max_age, ENVIRONMENTS_EVERY),
+                                            self.forge.environments, None, force)
+        if envs is None and not named:
+            # No list, so no telling whether a production environment exists: never "doesn't deploy".
+            return {**blank, "at": 0, "error": env_err}
+        pick = pick_environment((envs or {}).get("envs"), environment)
+        if pick is None:
+            stopped = envs.get("stopped")
+            if stopped is None:  # a complete list with nothing production-like: merged is final
+                return {**blank, "deploys": False, "at": env_at, "error": env_err}
+            if stopped == "budget":
+                return {**blank, "partial": True, "at": env_at, "error": env_err}
+            return {**blank, "at": env_at, "error": env_err or (
+                "too many environments to list and none named production, prod or live: "
+                "name the one deploys go to in forge.json (requests.deploy.environment)")}
+        env = pick["name"]
+
+        def fetch():
+            prev = self.peek(f"deployments:{env}")
+            prev = prev[0] if prev and isinstance(prev[0], dict) else {}
+            live = dict(prev.get("live") or {})
+            no = {tuple(p) for p in prev.get("_no") or []}
+            deps, newest, seen, listed, partial = self.forge.deployments(env, prev.get("_seen") or {})
+            now = time.time()
+            got = self.peek("merged")
+            # Merges from whatever another poll fetched lately, never a fetch of our own (as
+            # milestone-issues). Without them, keep what's known and compare nothing.
+            if got and now - got[1] <= PEEK_MAX_AGE:
+                rows = [r for r in got[0] or [] if r.get("merge_sha")]
+                shas = {r["merge_sha"] for r in rows}
+                live = {k: v for k, v in live.items() if k in shas}
+                for r in rows:  # newest first
+                    m = r["merge_sha"]
+                    if m in live:
+                        continue
+                    if over_budget():
+                        partial = True
+                        break
+                    for d in deps:
+                        # A deployment that finished before the merge can't hold it.
+                        if (d["sha"], m) in no or (d["at_ms"] and r.get("merged_ms") and d["at_ms"] < r["merged_ms"]):
+                            continue
+                        if over_budget():
+                            partial = True
+                            break
+                        has = self.forge.contains(d["sha"], m)
+                        if has:
+                            live[m] = {"sha": d["sha"], "at_ms": d["at_ms"]}
+                            break
+                        if has is False:  # None: couldn't compare; ask again next fetch
+                            no.add((d["sha"], m))
+                    if partial:
+                        break
+                kept = {d["sha"] for d in deps}
+                no = {p for p in no if p[0] in kept and p[1] in shas}
+            recent = newest is not None and newest >= now * 1000 - DEPLOYS_RECENT * DAY
+            return {"environment": env, "named": named, "deploys": named or recent, "url": pick.get("url"),
+                    "latest": {k: deps[0][k] for k in ("sha", "ref", "at_ms")} if deps else None,
+                    "live": live, "partial": partial,
+                    # Private: stripped below. Pairs known not to be contained, GitHub verdicts.
+                    "_no": sorted(list(p) for p in no), "_seen": {k: v for k, v in seen.items() if k in set(listed)}}
+
+        data, at, err = self.cached(f"deployments:{env}", max_age, fetch,
+                                    {**blank, "environment": env, "url": pick.get("url")}, force)
+        out = {k: v for k, v in data.items() if not k.startswith("_")}
+        out["named"], out["url"] = named, pick.get("url") or out.get("url")
+        if named and out.get("deploys") is False:  # an answer cached before forge.json named it
+            out["deploys"] = True
+        return {**out, "at": at, "error": err or env_err}
 
     def merge(self, iid, sha):
         text = self.forge.merge(iid, sha)
@@ -2263,6 +2539,7 @@ def main(argv):
         "merge": lambda: p.merge(int(a[0]), a[1] if len(a) > 1 else ""),
         "merged": lambda: p.merged(age(0), force(1)),
         "deployed": lambda: p.deployed(a[0], a[1] if len(a) > 1 else ""),
+        "deployments": lambda: p.deployments(age(0), force(1), a[2] if len(a) > 2 else ""),
         "order": lambda: p.order(age(0), force(1), a[2] if len(a) > 2 else ""),
         "pipelines": lambda: p.pipelines(age(0), force(1)),
         "jobs": lambda: p.jobs(int(a[0]), age(1), force(2)),
