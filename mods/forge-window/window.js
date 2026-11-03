@@ -138,3 +138,58 @@ export function projectFrom(fields, remote, on, providerForHost, forges) {
   if (!provider) return { none: true, top: fields.top, host: remote.host };
   return { provider, host: remote.host, repo: remote.path, on: on ?? null, folder: fields.top };
 }
+
+// Whether a value is a project Forge can open (projectFrom's, not its { none } or null).
+export const usableProject = (p) => Boolean(p && typeof p === "object" && !p.none && p.provider && p.host && p.repo);
+
+// What `git` says about a folder, one `name\tvalue` line each: top (the checkout's top
+// folder), url (origin's URL) and linked (1 in a linked worktree, 0 in the main checkout:
+// a linked worktree's git dir differs from the repo's common dir). Nothing outside a repo.
+// main.js runs it with `sh -c` in a folder, on its space's machine.
+export const RESOLVE = `top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+printf 'top\\t%s\\n' "$top"
+printf 'url\\t%s\\n' "$(git remote get-url origin 2>/dev/null)"
+gd=$(cd "$(git rev-parse --git-dir)" && pwd -P)
+cd=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+if [ "$gd" = "$cd" ]; then printf 'linked\\t0\\n'; else printf 'linked\\t1\\n'; fi`;
+
+// RESOLVE's output as fields ({} for no output).
+export const parseFields = (stdout) => Object.fromEntries(String(stdout ?? "").split("\n").filter(Boolean).map((l) => l.split("\t")));
+
+// A promise that rejects after `ms` unless `promise` settled first. sleep(ms) is the
+// caller's timer (herdr-app has no setTimeout: main.js passes cx.sleep).
+export function withTimeout(promise, ms, sleep) {
+  let settled = false;
+  const job = Promise.resolve(promise).finally(() => { settled = true; });
+  const timer = Promise.resolve(sleep(ms)).then(() => {
+    if (!settled) throw new Error(`timed out after ${Math.round(ms / 1000)} s`);
+    return job;
+  });
+  return Promise.race([job, timer]);
+}
+
+// The bar's "Other project" rows: one per repo open in some space, across spaces and
+// machines. entries: [{ space, project, linked }] in spaces() order, project from
+// projectFrom (null or { none } outside a GitLab/GitHub repo: left out). The window's own
+// project (current) is left out too. Each repo opens from one of its spaces: one on this
+// computer (space.machine null) before another machine's, then a main checkout before a
+// linked worktree, then the first in spaces() order. Rows follow the first space of each
+// repo. Each row: { key, label, host, showHost, project, space }. showHost: draw the host
+// beside the label, for a host other than gitlab.com or github.com, or when two rows share a
+// label (the same owner/repo on both).
+export function otherProjects(entries, current) {
+  const skip = usableProject(current) ? projectKey(current) : null;
+  const rank = (e) => (e.space?.machine == null ? 0 : 2) + (e.linked ? 1 : 0);
+  const best = new Map();
+  for (const e of entries ?? []) {
+    if (!usableProject(e?.project)) continue;
+    const key = projectKey(e.project);
+    if (key === skip) continue;
+    const had = best.get(key);
+    if (!had || rank(e) < rank(had)) best.set(key, e);
+  }
+  const rows = [...best].map(([key, e]) => ({ key, label: e.project.repo, host: e.project.host, project: e.project, space: e.space }));
+  const labels = new Map();
+  for (const r of rows) labels.set(r.label, (labels.get(r.label) ?? 0) + 1);
+  return rows.map((r) => ({ ...r, showHost: (r.host !== "gitlab.com" && r.host !== "github.com") || labels.get(r.label) > 1 }));
+}
