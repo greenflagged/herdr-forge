@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { parseRemote, providerForHost } from "../shared/lib.js";
-import { PANELS, forgeLayout, keptBlocks, parseConfig, projectFrom, withConfig, rememberedProject,
-  selectedPanels, togglePanel, panelSelectionKey, panelLabel } from "../mods/forge-window/window.js";
+import { PANELS, RESOLVE, forgeLayout, keptBlocks, otherProjects, parseConfig, parseFields, projectFrom, withConfig, withTimeout,
+  rememberedProject, selectedPanels, togglePanel, panelSelectionKey, panelLabel, usableProject } from "../mods/forge-window/window.js";
 
 const project = { provider: "gitlab", host: "gitlab.com", repo: "acme/shop", on: "mac", folder: "/src/shop" };
 const mods = (node) => node.content ? [node.content.mod] : (node.children ?? []).flatMap(mods);
@@ -124,4 +128,98 @@ test("custom blocks survive removal of every standard panel", () => {
   const layout = forgeLayout(project, {}, [{ parent: "forge-middle", block: custom }], []);
   assert.deepEqual(mods(layout), ["forge-window", "my-panel"]);
   assert.equal(layout.children[1].children[0].id, "forge-middle");
+});
+
+// otherProjects: spaces as main.js's bar sees them (machine null: this computer).
+const repo = (r, host = "gitlab.com") => ({ provider: "gitlab", host, repo: r, on: null, folder: `/src/${r}` });
+const sp = (id, machine = null) => ({ id, name: id, machine });
+
+test("otherProjects: one row per repo, from the main checkout over a linked worktree", () => {
+  const rows = otherProjects([
+    { space: sp("wt"), project: repo("a/b"), linked: true },
+    { space: sp("main"), project: repo("a/b"), linked: false },
+  ], null);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].space.id, "main");
+  assert.deepEqual(Object.keys(rows[0]).sort(), ["host", "key", "label", "project", "showHost", "space"]);
+  assert.equal(rows[0].key, "gitlab.com/a/b");
+  assert.equal(rows[0].label, "a/b");
+  assert.equal(rows[0].host, "gitlab.com");
+  assert.equal(rows[0].showHost, false);
+  assert.equal(rows[0].project.folder, "/src/a/b");
+});
+
+test("otherProjects: showHost for another host, and for the same owner/repo on two hosts", () => {
+  const rows = otherProjects([
+    { space: sp("gl"), project: repo("a/b"), linked: false },
+    { space: sp("gh"), project: { ...repo("a/b", "github.com"), provider: "github" }, linked: false },
+    { space: sp("own"), project: repo("x/y", "git.example.com"), linked: false },
+    { space: sp("plain"), project: repo("p/q"), linked: false },
+  ], null);
+  assert.deepEqual(rows.map((r) => [r.key, r.showHost]), [
+    ["gitlab.com/a/b", true], ["github.com/a/b", true], ["git.example.com/x/y", true], ["gitlab.com/p/q", false],
+  ]);
+});
+
+test("otherProjects: this computer beats another machine, even a linked worktree over its main checkout", () => {
+  const rows = otherProjects([
+    { space: sp("desk", "sean-arch-desktop"), project: { ...repo("a/b"), on: "sean-arch-desktop" }, linked: false },
+    { space: sp("here"), project: repo("a/b"), linked: true },
+  ], null);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].space.id, "here");
+  assert.equal(rows[0].project.on, null);
+});
+
+test("otherProjects: the window's project, non-repos and unsupported forges are left out; same owner, other repo stays", () => {
+  const rows = otherProjects([
+    { space: sp("board"), project: repo("a/b"), linked: false },
+    { space: sp("home"), project: null, linked: false },
+    { space: sp("cb"), project: { none: true, top: "/src/x", host: "codeberg.org" }, linked: false },
+    { space: sp("other"), project: repo("a/c"), linked: false },
+  ], repo("a/b"));
+  assert.deepEqual(rows.map((r) => r.key), ["gitlab.com/a/c"]);
+});
+
+test("otherProjects: rows follow each repo's first space; no current project hides nothing", () => {
+  const rows = otherProjects([
+    { space: sp("1", "desk"), project: repo("x/one"), linked: false },
+    { space: sp("2"), project: repo("x/two"), linked: false },
+    { space: sp("3"), project: repo("x/one"), linked: false },
+  ], null);
+  assert.deepEqual(rows.map((r) => [r.key, r.space.id]), [["gitlab.com/x/one", "3"], ["gitlab.com/x/two", "2"]]);
+  assert.equal(otherProjects([{ space: sp("1"), project: repo("x/one"), linked: false }], { none: true, top: "/" }).length, 1);
+  assert.deepEqual(otherProjects(undefined, null), []);
+  assert.equal(usableProject({ none: true, top: "/" }), false);
+  assert.equal(usableProject(project), true);
+});
+
+test("RESOLVE: top, url, and linked 0 in the main checkout, 1 in a linked worktree; nothing outside a repo", (t) => {
+  const g = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  try { g(tmpdir(), "--version"); } catch { t.skip("no git"); return; }
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "forge-resolve-")));
+  const main = join(dir, "main");
+  execFileSync("mkdir", [main]);
+  g(main, "init", "-q", "-b", "main");
+  g(main, "config", "user.email", "t@t");
+  g(main, "config", "user.name", "t");
+  g(main, "commit", "-q", "--allow-empty", "-m", "one");
+  g(main, "remote", "add", "origin", "git@gitlab.com:a/b.git");
+  g(main, "worktree", "add", "-q", join(dir, "wt"));
+  const run = (cwd) => parseFields(execFileSync("sh", ["-c", RESOLVE], { cwd, encoding: "utf8" }));
+  assert.deepEqual(run(main), { top: main, url: "git@gitlab.com:a/b.git", linked: "0" });
+  assert.deepEqual(run(join(dir, "wt")), { top: join(dir, "wt"), url: "git@gitlab.com:a/b.git", linked: "1" });
+  // From a subfolder too (git-dir is then absolute, common-dir may be relative).
+  execFileSync("mkdir", [join(main, "sub")]);
+  assert.equal(run(join(main, "sub")).linked, "0");
+  const outside = join(dir, "plain");
+  execFileSync("mkdir", [outside]);
+  assert.equal(execFileSync("sh", ["-c", RESOLVE], { cwd: outside, encoding: "utf8", env: { ...process.env, GIT_CEILING_DIRECTORIES: dir } }), "");
+  assert.deepEqual(parseFields(""), {});
+});
+
+test("withTimeout: the answer when it comes first, an error when the timer does", async () => {
+  const never = new Promise(() => {});
+  assert.equal(await withTimeout(Promise.resolve(3), 1000, () => never), 3);
+  await assert.rejects(withTimeout(never, 2000, () => Promise.resolve()), /timed out after 2 s/);
 });

@@ -26,7 +26,10 @@ stages on GitLab; PRs, `#iid`, workflow runs and workflows on GitHub.
   - The project path (13 px).
   - The host, when it isn't gitlab.com (11 px `dim`).
   - A pill with the machine ("this computer" when local).
-  - "Other project ▾": a list of the open spaces, each with its machine; picking one opens its repo.
+  - "Other project ▾": one row per GitLab or GitHub repo open in your spaces (`owner/repo`, with the host
+    when it isn't gitlab.com or github.com, or when two rows share a name), leaving out the project on the
+    window. Picking one opens that repo, from this computer before another machine and the main checkout
+    before a worktree.
   - "Panels N/6 ▾": checkboxes for each dashboard panel. Unticking removes its block; ticking adds it back.
   - On the right, "ctrl-shift-f" in 11 px `dim` and a "Back to ‹layout›" button.
 - Below the bar, a row: a 360 px column with MRs, Milestones and Velocity (330 px tall); a 340 px

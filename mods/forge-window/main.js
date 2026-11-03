@@ -4,8 +4,8 @@ import {
   exec, readTextFile, writeTextFile, appHome, props, theme, focused, spaces, panes, shared, setShared, run, closeOverlay, notify,
 } from "herdr";
 import { parseRemote, providerForHost } from "./lib.js";
-import { PANELS, parseConfig, forgeLayout, keptBlocks, projectFrom, withConfig, rememberedProject,
-  panelSelectionKey, selectedPanels, togglePanel, panelLabel } from "./window.js";
+import { PANELS, RESOLVE, parseConfig, parseFields, forgeLayout, keptBlocks, otherProjects, projectFrom, withConfig, withTimeout,
+  rememberedProject, panelSelectionKey, selectedPanels, togglePanel, panelLabel } from "./window.js";
 import { button, pill } from "./ui.js";
 
 // Forge: ctrl-shift-f (keys.json: "mod.open:forge-window") turns the whole Herdr window into
@@ -22,9 +22,14 @@ import { button, pill } from "./ui.js";
 
 const LAYOUT = "forge";
 const STATE = "forge-window.state"; // shared: { project, previous }
-const RESOLVE = `top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-printf 'top\\t%s\\n' "$top"
-printf 'url\\t%s\\n' "$(git remote get-url origin 2>/dev/null)"`;
+// The bar's "Other project" list: how long a space's repo is trusted before it is looked up
+// again (seconds; SPACES_RETRY after a failed look), and how long one look may take (ms).
+// RESOLVE_STALL (ms): a look still marked waiting after this was interrupted (herdr-app's
+// interrupt skips the step after the await), so scan looks again and the footer stops counting it.
+const SPACES_EVERY = 600;
+const SPACES_RETRY = 60;
+const RESOLVE_TIMEOUT = 10000;
+const RESOLVE_STALL = RESOLVE_TIMEOUT * 2;
 
 const state = () => shared(STATE) ?? {};
 const save = (patch) => setShared(STATE, { ...state(), ...patch });
@@ -52,10 +57,14 @@ function spaceFolder(sp) {
   return cwd ? { on: sp.machine ?? null, cwd } : null;
 }
 
-async function resolve(where, config) {
+// RESOLVE's fields for a folder ({} outside a repo), and the project they make (projectFrom).
+async function resolveFields(where) {
   const r = await exec("sh", ["-c", RESOLVE], { cwd: where.cwd, on: where.on });
-  const f = Object.fromEntries(r.stdout.split("\n").filter(Boolean).map((l) => l.split("\t")));
-  return projectFrom(f, parseRemote(f.url ?? ""), where.on, providerForHost, config.forges);
+  return parseFields(r.stdout);
+}
+const projectOfFields = (f, on, config) => projectFrom(f, parseRemote(f.url ?? ""), on, providerForHost, config?.forges);
+async function resolve(where, config) {
+  return projectOfFields(await resolveFields(where), where.on, config);
 }
 
 // Writes layouts/forge.json for a project (only when it changed: Herdr reloads the layout
@@ -124,22 +133,81 @@ export default class Forge extends View {
     this.panelBusy = false;
     this.panelAt = 0;
     this.panelKeys = cx.focus_handle();
-    this.busy = null;   // the space being opened
+    this.busy = null;   // the key of the row being opened
+    // What repo each space is in, for the "Other project" list: space id -> { key (the
+    // space's machine and folder: spaceFolder), at, waiting, ok, fields (RESOLVE's), on }.
+    this.known = new Map();
     cx.spawn(async (cx) => { this.config = await readConfig(); this.configReady = true; cx.notify(); });
+    this.scan(cx);
   }
 
-  // Another space's repo, from the bar's list.
-  openSpace(sp, cx) {
+  // Looks up the repo of each space whose entry is missing, stale (SPACES_EVERY, or
+  // SPACES_RETRY after a failure), for another folder, or waiting past RESOLVE_STALL, all at
+  // once. A slow look is cut off at RESOLVE_TIMEOUT and an interrupted one is redone after
+  // RESOLVE_STALL, so a machine that is away can't hold the list. Runs when the bar starts
+  // and each time the picker opens, never from render. The project is made from the fields
+  // at render (projectOfFields), so forge.json read later still applies.
+  scan(cx) {
+    let list;
+    try { list = spaces() ?? []; } catch { return; }
+    const now = Date.now();
+    const ids = new Set(list.map((sp) => sp.id));
+    for (const id of this.known.keys()) if (!ids.has(id)) this.known.delete(id);
+    const due = [];
+    for (const sp of list) {
+      const where = spaceFolder(sp);
+      if (!where) { this.known.delete(sp.id); continue; }
+      const key = `${where.on ?? ""}\t${where.cwd}`;
+      const had = this.known.get(sp.id);
+      const same = had?.key === key;
+      if (same && (had.waiting ? now - had.at < RESOLVE_STALL : now - had.at < (had.ok ? SPACES_EVERY : SPACES_RETRY) * 1000)) continue;
+      // A refresh of the same folder keeps showing what it knew while it looks again.
+      const entry = { key, at: now, waiting: true, ok: false, fields: same ? had.fields : null, on: where.on };
+      this.known.set(sp.id, entry);
+      due.push([entry, where]);
+    }
+    if (!due.length) return;
+    cx.spawn(async (cx) => {
+      const sleep = (ms) => cx.sleep(ms);
+      await Promise.allSettled(due.map(async ([entry, where]) => {
+        try {
+          entry.fields = await withTimeout(resolveFields(where), RESOLVE_TIMEOUT, sleep);
+          entry.ok = true;
+        } catch { entry.ok = false; } // machine away or timed out: looked up again after SPACES_RETRY
+        entry.waiting = false;
+        entry.at = Date.now();
+        try { cx.notify(); } catch { /* the bar restarted with a new layout */ }
+      }));
+    });
+  }
+
+  // The rows of the "Other project" list (window.js otherProjects) from what scan found, and
+  // how many spaces it is still looking at.
+  otherRows() {
+    let list;
+    try { list = spaces() ?? []; } catch { list = []; }
+    const entries = [];
+    let pending = 0;
+    const now = Date.now();
+    for (const space of list) {
+      const k = this.known.get(space.id);
+      if (!k) continue;
+      if (k.waiting && now - k.at < RESOLVE_STALL) pending++;
+      if (!k.fields) continue;
+      entries.push({ space, project: projectOfFields(k.fields, k.on, this.config), linked: k.fields.linked === "1" });
+    }
+    return { rows: otherProjects(entries, state().project), pending };
+  }
+
+  // Shows a row's repo, from the space scan picked (no second look).
+  openRow(row, cx) {
     if (this.panelBusy || this.busy) return;
     this.picker = false;
-    this.busy = sp.id;
+    this.busy = row.key;
     cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const where = spaceFolder(sp);
-        const project = where ? await resolve(where, this.config) : null;
-        if (!project || project.none) toast(`${sp.name} isn't in a ${project?.host ? `${project.host} repo Forge supports` : "git repo with a GitLab or GitHub remote"}.`);
-        else await show(project, this.config);
+        await show(row.project, this.config);
       } catch (e) {
         toast(msg(e), "error");
       }
@@ -182,16 +250,20 @@ export default class Forge extends View {
     const s = state(), p = s.project;
     const prev = s.previous && s.previous !== LAYOUT ? s.previous : "main";
 
+    const { rows, pending } = this.picker ? this.otherRows() : { rows: [], pending: 0 };
+    const foot = pending ? `Looking at ${pending} space${pending === 1 ? "" : "s"}…` : rows.length ? null : "No other project is open in a space";
     const list = v_flex().id("forge-spaces").min_w(240).max_h(360).overflow_y_scrollbar().p(4).gap(1).rounded(6)
       .bg(t.popover).border_1().border_color(t.border).shadow_md()
       .child(div().px(8).py(3).text_size(10.5).text_color(t.dim).child("Choose a project · remembered"))
-      .children(spaces().map((sp) => h_flex().id(`forge-sp-${sp.id}`).gap(8).items_center().px(8).py(4).rounded(4)
+      .children(rows.map((row) => h_flex().id(`forge-repo-${row.key}`).gap(8).items_center().px(8).py(4).rounded(4)
         .text_size(12).cursor_pointer().hover((st) => st.bg(t.hover))
-        .on_click((_e, cx) => this.openSpace(sp, cx))
-        .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(sp.name))
-        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(this.busy === sp.id ? "opening…" : sp.machine ?? "this computer"))));
+        .on_click((_e, cx) => this.openRow(row, cx))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(row.label))
+        .when(row.showHost, (e) => e.child(div().flex_none().text_size(10.5).text_color(t.dim).child(row.host)))
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(this.busy === row.key ? "opening…" : row.space.machine ?? "this computer"))))
+      .when(Boolean(foot), (e) => e.child(div().px(8).py(3).text_size(10.5).text_color(t.dim).child(foot)));
     const switcher = Popover.new("forge-switch").open(this.picker)
-      .on_open_change((o, cx) => { this.picker = o; cx.notify(); })
+      .on_open_change((o, cx) => { this.picker = o; if (o) this.scan(cx); cx.notify(); })
       .trigger(h_flex().id("forge-switch-trigger").gap(6).items_center().px(8).py(2).rounded(5).cursor_pointer()
         .tooltip("Your project choice is remembered across reopens and app restarts")
         .border_1().border_color(this.picker ? t.accent : t.border).hover((st) => st.bg(t.hover))
