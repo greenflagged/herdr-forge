@@ -1,5 +1,5 @@
 """forge.py against a fake glab, in a throwaway HOME."""
-import json, os, subprocess, sys, tempfile, time, unittest
+import json, os, re, subprocess, sys, tempfile, time, unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "shared", "forge.py")
@@ -24,6 +24,20 @@ def issue(iid, labels=(), state="opened", **kw):
             "labels": list(labels), "milestone": None, "assignees": [], "author": {"username": "bo"},
             "created_at": iso(NOW - 10 * 86400000), "updated_at": iso(NOW - iid * 60000), "closed_at": None,
             "user_notes_count": 0, "merge_requests_count": 0, "web_url": f"https://gitlab.com/acme/shop/-/issues/{iid}", **kw}
+
+
+def env(i, name, tier=None):
+    return {"id": i, "name": name, "tier": tier, "state": "available"}
+
+
+def dep(i, sha, at, status="success"):
+    return {"id": i, "sha": sha, "ref": "main", "status": status, "created_at": iso(at), "updated_at": iso(at),
+            "finished_at": iso(at) if status == "success" else None}
+
+
+ENVS = r"environments\?states=available&per_page=100&page=1$"
+OK_DEPS = r"deployments\?environment=production&order_by=id&sort=desc&status=success"
+ANY_DEPS = r"deployments\?environment=production&order_by=id&sort=desc&per_page=1$"
 
 
 class Forge(unittest.TestCase):
@@ -140,6 +154,214 @@ class Forge(unittest.TestCase):
         self.assertGreater(d["at_ms"], now - 60000)
         self.assertEqual(len(self.calls()), n, "read with the cached list, no forge call")
         self.assertIn("bad commit", self.run_forge("deployed", *P, "../x", "")["error"])
+
+    # -- deployments --
+
+    def merged_cache(self, *rows, extra=()):
+        """Caches `merged` with (iid, merge_sha, merged_ms) rows; `deployments` reads it."""
+        self.routes([[r"merge_requests\?state=merged", {"out": [mr(i, merged_at=iso(at), merge_commit_sha=sha)
+                                                                  for i, sha, at in rows]}],
+                     [r"pipelines\?ref=main", {"out": []}], *extra])
+        self.assertIsNone(self.run_forge("merged", *P, 600, 1)["error"])
+
+    def test_deployments_pick_production_and_say_when_nothing_deploys(self):
+        now = time.time() * 1000
+        self.routes([[ENVS, {"out": [env(1, "prod-eu", "production"), env(2, "production"), env(3, "review/x")]}],
+                     [OK_DEPS, {"out": [dep(5, "d5", now - 3600000)]}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertIsNone(out["error"])
+        self.assertEqual((out["environment"], out["named"], out["deploys"]), ("production", False, True))
+        self.assertEqual(out["url"], "https://gitlab.com/acme/shop/-/environments/2")
+        self.assertEqual(out["latest"]["sha"], "d5")
+        self.assertFalse(any(re.search(ANY_DEPS, c) for c in self.calls()),
+                         "a recent success is enough: no any-status call")
+        # Only a production-tier environment: it counts.
+        self.tmp.cleanup(); self.setUp()
+        self.routes([[ENVS, {"out": [env(1, "prod-eu", "production")]}],
+                     [r"deployments\?environment=prod-eu&.*status=success", {"out": [dep(5, "d5", now - 3600000)]}]])
+        self.assertEqual(self.run_forge("deployments", *P, 60, 0)["environment"], "prod-eu")
+        # Nothing production-like in a complete list: merged is final, and no deployments call.
+        self.tmp.cleanup(); self.setUp()
+        self.routes([[ENVS, {"out": [env(3, "review/x"), env(4, "staging", "staging")]}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["environment"], out["deploys"], out["error"], out["live"]), (None, False, None, {}))
+        self.assertFalse(any("deployments" in c for c in self.calls()))
+        self.assertTrue(all("states=available" in c for c in self.calls()))
+
+    def test_deployments_named_environment_wins_with_the_forges_spelling(self):
+        self.routes([[ENVS, {"out": [env(1, "production"), env(2, "Live-EU")]}],
+                     [r"deployments\?environment=Live-EU&", {"out": []}]])
+        out = self.run_forge("deployments", *P, 60, 0, "live-eu")
+        self.assertEqual((out["environment"], out["named"], out["deploys"]), ("Live-EU", True, True),
+                         "named: deploys even with no deployment yet")
+        self.assertIsNone(out["latest"])
+
+    def test_deployments_say_which_merges_are_live(self):
+        now = time.time() * 1000
+        self.merged_cache((7, "m7", now - 3 * 3600000), (8, "m8", now - 3600000), extra=[
+            [ENVS, {"out": [env(2, "production")]}],
+            [OK_DEPS, {"out": [dep(4, "d4", now - 2 * 3600000), dep(5, "d5", now - 1800000)]}],
+            [r"merge_base\?refs%5B%5D=m7&refs%5B%5D=d5", {"out": {"id": "m7"}}],
+            [r"merge_base\?refs%5B%5D=m8&refs%5B%5D=d5", {"out": {"id": "m7"}}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertIsNone(out["error"])
+        self.assertEqual(out["live"], {"m7": {"sha": "d5", "at_ms": out["latest"]["at_ms"]}})
+        self.assertEqual([k for k in out if k.startswith("_")], [], "private keys stay in the cache")
+        self.assertFalse(any("refs%5B%5D=d4" in c and "m8" in c for c in self.calls()),
+                         "a deployment that finished before the merge isn't compared")
+        n = len(self.calls())
+        again = self.run_forge("deployments", *P, 0, 0)
+        self.assertEqual(again["live"], out["live"])
+        self.assertFalse(any("merge_base" in c for c in self.calls()[n:]), "known verdicts aren't asked again")
+        row = self.db().execute("SELECT json FROM cache WHERE k LIKE 'deployments:production@%'").fetchone()
+        self.assertEqual(json.loads(row[0])["_no"], [["d5", "m8"]])
+        # A merge doesn't drop the answer.
+        self.routes([[r"mr merge", {"out": "Merged"}]])
+        self.run_forge("merge", *P, 9, "sha9")
+        self.assertIsNotNone(self.db().execute("SELECT 1 FROM cache WHERE k LIKE 'deployments:production@%'").fetchone())
+
+    def test_a_deployment_of_the_merge_commit_itself_is_live_without_a_compare(self):
+        now = time.time() * 1000
+        self.merged_cache((7, "m7", now - 3600000), extra=[
+            [ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(5, "m7", now - 60000)]}]])
+        self.assertIn("m7", self.run_forge("deployments", *P, 60, 0)["live"])
+        self.assertFalse(any("merge_base" in c for c in self.calls()))
+
+    def test_deployments_count_recent_failed_or_unrun_ones_as_deploying(self):
+        now = time.time() * 1000
+        self.routes([[ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": []}],
+                     [ANY_DEPS, {"out": [dep(9, "x", now - 10 * 86400000, status="created")]}]])
+        self.assertTrue(self.run_forge("deployments", *P, 60, 0)["deploys"])
+        self.routes([[ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(3, "y", now - 300 * 86400000)]}],
+                     [ANY_DEPS, {"out": [dep(9, "x", now - 200 * 86400000, status="failed")]}]])
+        out = self.run_forge("deployments", *P, 0, 1)
+        self.assertEqual((out["deploys"], out["error"]), (False, None), "nothing in 120 days: no deploy step")
+
+    def test_deploys_follows_the_argument_not_the_cached_answers(self):
+        now = time.time() * 1000
+        self.routes([[ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(5, "d5", now - 300 * 86400000)]}],
+                     [ANY_DEPS, {"out": [dep(5, "d5", now - 300 * 86400000)]}]])
+        self.assertTrue(self.run_forge("deployments", *P, 60, 0, "production")["deploys"], "named: deploys")
+        n = len(self.calls())
+        out = self.run_forge("deployments", *P, 3600, 0)
+        self.assertEqual(len(self.calls()), n, "the same cached answer")
+        self.assertEqual((out["named"], out["deploys"]), (False, False), "unnamed: nothing in 120 days")
+        self.assertTrue(self.run_forge("deployments", *P, 3600, 0, "production")["deploys"])
+
+    def test_a_forced_read_keeps_the_environment_lists_hourly_floor(self):
+        now = time.time() * 1000
+        self.routes([[ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}]])
+        self.run_forge("deployments", *P, 60, 0)
+        n = sum(bool(re.search(ENVS, c)) for c in self.calls())
+        self.run_forge("deployments", *P, 0, 1)
+        self.assertEqual(sum(bool(re.search(ENVS, c)) for c in self.calls()), n, "production known: not listed again")
+        self.assertEqual(sum(bool(re.search(OK_DEPS, c)) for c in self.calls()), 2, "the deployments are")
+        # A list that picks nothing is read again when forced: one may have been added.
+        self.tmp.cleanup(); self.setUp()
+        self.routes([[ENVS, {"out": [env(3, "staging")]}]])
+        self.run_forge("deployments", *P, 60, 0)
+        self.run_forge("deployments", *P, 0, 1)
+        self.assertEqual(sum(bool(re.search(ENVS, c)) for c in self.calls()), 2)
+
+    def test_deployments_refuse_a_bad_environment_but_take_an_empty_one(self):
+        self.routes([[ENVS, {"out": []}]])
+        self.assertIn("bad environment", self.run_forge("deployments", *P, 60, 0, "prod\nx")["error"])
+        out = self.run_forge("deployments", *P, 60, 0, "")
+        self.assertEqual((out["error"], out["deploys"], out["named"]), (None, False, False))
+
+    def test_deployments_are_partial_when_the_budget_runs_out(self):
+        now = time.time() * 1000
+        self.merged_cache((7, "m7", now - 3600000), extra=[
+            [ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}]])
+        out = self.run_forge("deployments", *P, 60, 0, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((out["partial"], out["deploys"], out["live"]), (True, True, {}))
+        self.assertFalse(any("merge_base" in c for c in self.calls()))
+
+    def test_unreadable_environments_never_say_no_deploy_step(self):
+        self.routes([[r"environments", {"err": "glab: 403 Forbidden (HTTP 403)"}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["deploys"], out["environment"]), (None, None))
+        self.assertIn("403", out["error"])
+        self.assertFalse(any("deployments" in c for c in self.calls()))
+
+    def test_a_pair_the_forge_cant_compare_is_asked_again(self):
+        now = time.time() * 1000
+        self.merged_cache((7, "m7", now - 3 * 3600000), (8, "m8", now - 2 * 3600000), extra=[
+            [ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}],
+            [r"merge_base\?refs%5B%5D=m8&", {"err": "glab: Could not find ref: m8 (HTTP 400)"}],
+            [r"merge_base\?refs%5B%5D=m7&", {"out": {"id": "m7"}}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["error"], list(out["live"])), (None, ["m7"]))
+        n = len(self.calls())
+        self.run_forge("deployments", *P, 0, 0)
+        self.assertEqual(sum("refs%5B%5D=m8" in c for c in self.calls()[n:]), 1, "not remembered as not live")
+        # A server error is an error, even when a sha in its text holds "404".
+        self.tmp.cleanup(); self.setUp()
+        self.merged_cache((8, "m8", now - 2 * 3600000), extra=[
+            [ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}],
+            [r"merge_base", {"err": "glab: 500 Internal Server Error for a404b (HTTP 500)"}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertIn("HTTP 500", out["error"])
+        self.assertIsNone(out["deploys"])
+
+    def test_deployments_without_a_cached_merged_compare_nothing(self):
+        now = time.time() * 1000
+        self.routes([[ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["live"], out["deploys"]), ({}, True))
+        self.assertFalse(any("merge_base" in c for c in self.calls()))
+
+    def test_a_merge_that_left_merged_leaves_live(self):
+        now = time.time() * 1000
+        deps = [[ENVS, {"out": [env(2, "production")]}], [OK_DEPS, {"out": [dep(5, "m7", now - 60000)]}]]
+        self.merged_cache((7, "m7", now - 3600000), extra=deps)
+        self.assertIn("m7", self.run_forge("deployments", *P, 60, 0)["live"])
+        self.merged_cache((8, "m8", now - 600000), extra=[
+            *deps, [r"merge_base", {"out": {"id": "other"}}]])
+        self.assertEqual(self.run_forge("deployments", *P, 0, 0)["live"], {})
+
+    def test_a_long_environment_list_looks_production_up_by_name(self):
+        now = time.time() * 1000
+        page = lambda p: [env(p * 1000 + i, f"review/{p}-{i}") for i in range(100)]
+        routes = [[ENVS, {"out": page(1)}],
+                  [r"environments\?states=available&per_page=100&page=2$", {"out": page(2)}],
+                  [r"environments\?states=available&per_page=100&page=3$", {"out": page(3)}],
+                  [r"environments\?states=available&name=", {"out": []}]]
+        self.routes(routes)
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["deploys"], out["environment"]), (None, None), "a capped list never says no deploy step")
+        self.assertIn("forge.json", out["error"])
+        self.assertFalse(any("page=4" in c for c in self.calls()), "stops at ENVIRONMENT_PAGES")
+        self.assertEqual(sum("&name=" in c for c in self.calls()), 3, "production, prod, live")
+        # production past the cap, found by name.
+        self.tmp.cleanup(); self.setUp()
+        self.routes([[r"environments\?states=available&name=production$", {"out": [env(7, "production")]}], *routes,
+                     [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}]])
+        out = self.run_forge("deployments", *P, 60, 0)
+        self.assertEqual((out["environment"], out["deploys"]), ("production", True))
+        self.assertFalse(any("page=2" in c for c in self.calls()), "production known: no paging for the tier fallback")
+        # prod found by name: paging goes on, and a case variant of production there outranks it.
+        self.tmp.cleanup(); self.setUp()
+        self.routes([[r"environments\?states=available&name=prod$", {"out": [env(8, "prod")]}],
+                     [r"environments\?states=available&per_page=100&page=2$", {"out": [*page(2)[:50], env(9, "Production")]}],
+                     *routes, [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}]])
+        self.assertEqual(self.run_forge("deployments", *P, 60, 0)["environment"], "Production")
+        self.assertTrue(any("page=2" in c for c in self.calls()), "prod known: production may still be on a later page")
+        self.assertFalse(any("page=3" in c for c in self.calls()), "page 2 was short: the list ended")
+        # production on page 1: no lookups by name, no paging.
+        self.tmp.cleanup(); self.setUp()
+        self.routes([[ENVS, {"out": [*page(1)[:99], env(7, "production")]}], *routes[1:],
+                     [OK_DEPS, {"out": [dep(5, "d5", now - 60000)]}]])
+        self.assertEqual(self.run_forge("deployments", *P, 60, 0)["environment"], "production")
+        self.assertFalse(any("page=2" in c or "&name=" in c for c in self.calls()))
+        # Out of budget after page 1: can't tell yet, and the list is read again soon.
+        self.tmp.cleanup(); self.setUp()
+        self.routes(routes)
+        out = self.run_forge("deployments", *P, 3600, 0, HERDR_FORGE_BUDGET="0")
+        self.assertEqual((out["deploys"], out["partial"], out["error"]), (None, True, None))
+        self.assertEqual(len(self.calls()), 1, "page 1 is always read")
+        self.run_forge("deployments", *P, 0, 0, HERDR_FORGE_BUDGET="0")
+        self.assertEqual(len(self.calls()), 2, "a list cut short isn't kept for an hour")
 
     def test_merge_drops_the_merged_list(self):
         self.routes([[r"merge_requests\?state=merged", {"out": []}], [r"mr merge", {"out": "Merged"}]])

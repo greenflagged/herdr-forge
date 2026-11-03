@@ -315,7 +315,7 @@ Each panel is a mod, so you can place it in a layout of your own (a clone of `ma
 | `folder` | The project's checkout on that machine, where agents start (merge requests and issues). |
 | `actions` | Your own buttons (merge requests and issues). |
 | `migrations` | A pattern for migration file names (default Flyway's `V12__name.sql`), or `false` (merge requests; see [Merging in order](#merging-in-order)). |
-| `deploy` | `{ "label": "Flux", "check": "…" }`: how to tell a merge is live (merge requests; see [After a merge](#after-a-merge)). |
+| `deploy` | `{ "label": "Flux", "check": "…" }`: how to tell a merge is live (merge requests; see [After a merge](#after-a-merge)). `"environment": "<name>"`: one environment name, the one deploys go to; read by Workstream today, it overrides the production-like default (`production`, `prod`, `live`). |
 
 Each panel's other props are listed at the top of its `main.js`. To add a Forge button to a tab bar
 you've cloned, give the tab bar a button that runs `run("mod.open", { name: "forge-window" })`.
