@@ -296,7 +296,8 @@ agent, or a different machine for `glab`/`gh`:
 
 `issues.sync` sets how many seconds the issue browser waits between syncs with the forge, while
 the window is focused and while it's away: `"sync": { "focused": 60, "away": 300 }`. The defaults
-are 300 and 900. A missing or invalid value keeps its default, and anything under 30 counts as 30.
+are 300 and 900. A missing or invalid value keeps its default, and anything under 60 counts as 60
+(forge.py skips a sync less than 45 seconds after the last one).
 A layout that places Issues itself can pass the same `sync` prop.
 
 Forge takes any host it doesn't know for GitLab, except one with "github" in its name

@@ -191,10 +191,12 @@ test("props.sync falls back per field and keeps a floor", () => {
   }
   assert.deepEqual(logic.syncIntervals({ focused: "x", away: 600 }), { focused: logic.SYNC_FOCUSED, away: 600000 },
     "a valid field is kept beside a bad one");
-  assert.deepEqual(logic.syncIntervals({ focused: 1, away: 29.9 }), { focused: logic.SYNC_FLOOR, away: logic.SYNC_FLOOR },
+  assert.deepEqual(logic.syncIntervals({ focused: 1, away: 59.9 }), { focused: logic.SYNC_FLOOR, away: logic.SYNC_FLOOR },
     "values under the floor are raised to it");
-  assert.equal(logic.SYNC_FLOOR, 30000);
-  assert.deepEqual(logic.syncIntervals({ focused: 30, away: 31 }), { focused: 30000, away: 31000 });
+  assert.equal(logic.SYNC_FLOOR, 60000, "above forge.py's 45 s MIN_GAP, with room for jitter");
+  assert.deepEqual(logic.syncIntervals({ focused: 45, away: 50 }), { focused: 60000, away: 60000 },
+    "values at or just over MIN_GAP are raised too");
+  assert.deepEqual(logic.syncIntervals({ focused: 60, away: 61 }), { focused: 60000, away: 61000 });
 });
 
 test("stale cached rows stay visible while a background refresh fails", async () => {

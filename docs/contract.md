@@ -64,8 +64,9 @@ the person detached from its block shows ↙ Dock it back instead.
 - `sync`: `forge-issues` only. `{ focused?, away? }`, seconds between syncs with the forge
   while the window is focused and while it's away; default `{ focused: 300, away: 900 }`
   (`forge.json`'s `projects[key].issues.sync` arrives here). Each field is checked on its own: a
-  missing, non-numeric, non-finite or non-positive value keeps its default, and a value under 30
-  is raised to 30. An unfinished initial sync still continues at once, and ↻ still syncs now.
+  missing, non-numeric, non-finite or non-positive value keeps its default, and a value under 60
+  is raised to 60, safely above `forge.py`'s 45 s `MIN_GAP` between syncs. An unfinished
+  initial sync still continues at once, and ↻ still syncs now.
 
 `lib.js`'s `projectOf(props())` resolves these into `{ provider, host, repo, on, terms }`.
 Use `terms` for every forge word on screen: `terms.request` ("MR"/"PR"),
