@@ -49,12 +49,13 @@ test("another package's block in forge.json survives Forge rewriting it, in its 
 });
 
 test("forge.json adds per-project props and machine", () => {
-  const config = parseConfig(JSON.stringify({ projects: { "gitlab.com/acme/shop": { on: "vps", issues: { triage: true } } } }));
+  const config = parseConfig(JSON.stringify({ projects: { "gitlab.com/acme/shop": { on: "vps", issues: { triage: true, sync: { focused: 60, away: 300 } } } } }));
   const p = withConfig(project, config);
   assert.equal(p.on, "vps");
   const blocks = forgeLayout(p, config).children[1].children.flatMap((n) => n.children ?? [n]);
   const issues = blocks.find((b) => b.content.mod === "forge-issues").content.props;
   assert.equal(issues.triage, true);
+  assert.deepEqual(issues.sync, { focused: 60, away: 300 }, "issues.sync reaches the Issues props");
   assert.equal(issues.on, "vps");
   assert.deepEqual(parseConfig("{not json"), {});
   assert.deepEqual(parseConfig("[1]"), {});

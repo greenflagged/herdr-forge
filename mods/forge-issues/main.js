@@ -11,7 +11,7 @@ import { Chrome, button, chip, note, staleError, dropdown } from "./ui.js";
 import {
   STATES, PEOPLE, DEFAULT_SEP, sorts, nextSort, splitLabels, scopedChange, labelToggle, scopeValues, metaScopes,
   orderScopes, scopeTitle, facetEntries, togglePick, listQuery, triageConfig, skillLine, usesPriority, isAgentAction, scopeOf,
-  startView, projectStateKey, syncDue,
+  startView, projectStateKey, syncDue, syncIntervals,
 } from "./issues.js";
 
 // An issue browser, opened as a tab: tab.new { name, mod: "forge-issues", props }.
@@ -23,6 +23,7 @@ import {
 //   triage: true | { agent, task, tab } the optional triage agent (off by default)
 //   issue: 123                         open this issue at once (a link into the tab from another mod)
 //   view: { state, sort, picked, q, person }   person: "all", "assigned" or "created"
+//   sync: { focused: 300, away: 900 }   seconds between syncs while the window is focused / away (floor 30)
 // Keys on the list: ↑/↓ or j/k move the selection, / searches, Esc clears the search,
 // Enter opens the selected issue in the browser.
 // forge.py keeps the issues in SQLite on `on` and does the filtering, counting and
@@ -132,7 +133,7 @@ export default class Issues extends View {
       cx.notify();
       if (this.triage()) this.checkSkill(cx, false);
       this.booting = false;
-      if (this.shown() && syncDue(this.lastPoll, this.syncMore, window().active)) this.sync(cx, false);
+      if (this.shown() && syncDue(this.lastPoll, this.syncMore, window().active, syncIntervals(props()?.sync))) this.sync(cx, false);
     });
     // Searching waits for a pause in typing; the next page waits for the list to need it.
     cx.timer.every(150, (cx) => {
@@ -147,7 +148,7 @@ export default class Issues extends View {
     // Sync only while shown: a background tab keeps running but mustn't poll.
     cx.timer.every(5000, (cx) => {
       if (this.booting || !this.shown()) return;
-      if (syncDue(this.lastPoll, this.syncMore, window().active)) this.sync(cx, false);
+      if (syncDue(this.lastPoll, this.syncMore, window().active, syncIntervals(props()?.sync))) this.sync(cx, false);
     });
   }
 
