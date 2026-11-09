@@ -176,7 +176,8 @@ Every issue in the project, cached on your machine so filtering and search are i
   State, search, sort, labels, milestones, and People are remembered per project and machine
   across layout changes and app restarts. People sits beside the state and sort controls.
 - Reopening Issues reads its first page and metadata from the private SQLite cache in one local call.
-  Network syncs run only when stale (5 minutes focused, 15 minutes away), or when you press ↻.
+  Network syncs run only when stale (by default 5 minutes focused, 15 minutes away; see `sync` in
+  [Settings](#settings)), or when you press ↻.
   An unfinished initial sync continues in the background; changing filters never refetches issues.
 - Change priority, type, milestone and the other scoped labels from dropdowns, add or remove labels,
   comment, close and reopen. Every change goes to the forge first.
@@ -292,6 +293,11 @@ agent, or a different machine for `glab`/`gh`:
   "hidden": ["runners"]
 }
 ```
+
+`issues.sync` sets how many seconds the issue browser waits between syncs with the forge, while
+the window is focused and while it's away: `"sync": { "focused": 60, "away": 300 }`. The defaults
+are 300 and 900. A missing or invalid value keeps its default, and anything under 30 counts as 30.
+A layout that places Issues itself can pass the same `sync` prop.
 
 Forge takes any host it doesn't know for GitLab, except one with "github" in its name
 (`github.acme.com`). `forges` names the rest: `{ "ghe.acme.io": "github" }`.

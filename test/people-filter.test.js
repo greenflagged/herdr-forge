@@ -161,12 +161,40 @@ test("only preferences, never private issue previews, are saved in shared state"
 });
 
 test("network sync waits for freshness, except incomplete syncs", () => {
-  const now = 10000000;
-  assert.equal(logic.syncDue(now - 60000, false, true, now), false);
-  assert.equal(logic.syncDue(now - logic.SYNC_FOCUSED, false, true, now), true);
-  assert.equal(logic.syncDue(now - logic.SYNC_FOCUSED, false, false, now), false);
-  assert.equal(logic.syncDue(now - logic.SYNC_AWAY, false, false, now), true);
-  assert.equal(logic.syncDue(now, true, true, now), true, "unfinished initial syncs continue");
+  const now = 10000000, dflt = logic.syncIntervals();
+  assert.deepEqual(dflt, { focused: 300000, away: 900000 }, "defaults are 5 / 15 minutes");
+  assert.equal(logic.syncDue(now - 60000, false, true, dflt, now), false);
+  assert.equal(logic.syncDue(now - logic.SYNC_FOCUSED, false, true, dflt, now), true);
+  assert.equal(logic.syncDue(now - logic.SYNC_FOCUSED, false, false, dflt, now), false);
+  assert.equal(logic.syncDue(now - logic.SYNC_AWAY, false, false, dflt, now), true);
+  assert.equal(logic.syncDue(now, true, true, dflt, now), true, "unfinished initial syncs continue");
+});
+
+test("props.sync sets the focused and away intervals", () => {
+  const now = 10000000, custom = logic.syncIntervals({ focused: 60, away: 120 });
+  assert.deepEqual(custom, { focused: 60000, away: 120000 });
+  assert.equal(logic.syncDue(now - 59000, false, true, custom, now), false);
+  assert.equal(logic.syncDue(now - 60000, false, true, custom, now), true);
+  assert.equal(logic.syncDue(now - 60000, false, false, custom, now), false);
+  assert.equal(logic.syncDue(now - 120000, false, false, custom, now), true);
+  assert.equal(logic.syncDue(now, true, false, custom, now), true, "unfinished initial syncs still continue");
+  assert.deepEqual(logic.syncIntervals({ focused: 1.5 * 60 }), { focused: 90000, away: logic.SYNC_AWAY });
+});
+
+test("props.sync falls back per field and keeps a floor", () => {
+  const dflt = { focused: logic.SYNC_FOCUSED, away: logic.SYNC_AWAY };
+  for (const bad of [undefined, null, true, 60, "60", [60, 120], {}]) {
+    assert.deepEqual(logic.syncIntervals(bad), dflt, `sync: ${JSON.stringify(bad)}`);
+  }
+  for (const x of ["60", null, true, 0, -5, NaN, Infinity, [60], { s: 60 }]) {
+    assert.deepEqual(logic.syncIntervals({ focused: x, away: x }), dflt, `value: ${String(x)}`);
+  }
+  assert.deepEqual(logic.syncIntervals({ focused: "x", away: 600 }), { focused: logic.SYNC_FOCUSED, away: 600000 },
+    "a valid field is kept beside a bad one");
+  assert.deepEqual(logic.syncIntervals({ focused: 1, away: 29.9 }), { focused: logic.SYNC_FLOOR, away: logic.SYNC_FLOOR },
+    "values under the floor are raised to it");
+  assert.equal(logic.SYNC_FLOOR, 30000);
+  assert.deepEqual(logic.syncIntervals({ focused: 30, away: 31 }), { focused: 30000, away: 31000 });
 });
 
 test("stale cached rows stay visible while a background refresh fails", async () => {

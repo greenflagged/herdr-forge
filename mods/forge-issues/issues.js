@@ -22,9 +22,22 @@ export function projectStateKey(project) {
   return JSON.stringify([project.on ?? null, project.provider, project.host?.toLowerCase(), project.repo?.toLowerCase()]);
 }
 
+// How often a shown tab syncs with the forge, in ms: while the window is focused, and away.
 export const SYNC_FOCUSED = 5 * 60000, SYNC_AWAY = 15 * 60000;
-export function syncDue(lastPoll, more, active, now = Date.now()) {
-  return more || now - lastPoll >= (active ? SYNC_FOCUSED : SYNC_AWAY);
+// No interval goes below this, so a typo in forge.json can't hammer the forge API.
+export const SYNC_FLOOR = 30000;
+// props.sync: { focused, away } in seconds, each checked on its own. A missing,
+// non-numeric, non-finite or non-positive value keeps its default; one under the
+// floor is raised to it. Answers { focused, away } in ms.
+export function syncIntervals(v) {
+  const o = v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  const ms = (x, dflt) => typeof x === "number" && Number.isFinite(x) && x > 0 ? Math.max(x * 1000, SYNC_FLOOR) : dflt;
+  return { focused: ms(o.focused, SYNC_FOCUSED), away: ms(o.away, SYNC_AWAY) };
+}
+// An unfinished initial sync (`more`) continues at once; otherwise sync once the last
+// one is older than the interval for the window's state.
+export function syncDue(lastPoll, more, active, intervals = syncIntervals(), now = Date.now()) {
+  return more || now - lastPoll >= (active ? intervals.focused : intervals.away);
 }
 
 // The sorts on offer: "Triage rank" only with triage on.
